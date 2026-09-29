@@ -43,7 +43,7 @@ settings_col = db["settings"]
 # Telegram Application Setup
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# Helper: Get/Initialize User
+# Helper: Get/Initialize User Data directly from DB
 def get_user_data(user_id: int):
     today_str = datetime.now().strftime("%Y-%m-%d")
     user = users_col.find_one({"user_id": user_id})
@@ -145,12 +145,16 @@ async def channel_selected(update: Update, context):
 
 async def handle_next_video(update: Update, context):
     user_id = update.effective_user.id
-    user = get_user_data(user_id)
     
-    if user["credits"] <= 0:
+    # ALWAYS FETCH FRESH USER DATA DIRECTLY FROM MONGODB
+    user = users_col.find_one({"user_id": user_id})
+    if not user:
+        user = get_user_data(user_id)
+    
+    if user.get("credits", 0) <= 0:
         settings = get_settings()
         
-        if user["phase"] in ["FREE_20", "NEED_VPLINK"]:
+        if user.get("phase") in ["FREE_20", "NEED_VPLINK"]:
             vplink = settings.get("vplink_url", "https://vplink.in/M44")
             users_col.update_one({"user_id": user_id}, {"$set": {"phase": "NEED_VPLINK"}})
             
@@ -162,7 +166,7 @@ async def handle_next_video(update: Update, context):
             )
             return
 
-        elif user["phase"] in ["VERIFIED_30", "NEED_LINKHUB", "EXTRA_10"]:
+        elif user.get("phase") in ["VERIFIED_30", "NEED_LINKHUB", "EXTRA_10"]:
             users_col.update_one({"user_id": user_id}, {"$set": {"phase": "NEED_LINKHUB"}})
             
             keyboard = [[InlineKeyboardButton("🔗 Verify on Link-Hub", url=LINKHUB_URL)]]
@@ -178,18 +182,17 @@ async def handle_next_video(update: Update, context):
         await update.message.reply_text("Kripya pehle /start dabakar koi channel select karein.")
         return
 
-    # --- PURANI VIDEO DELETE KARNE KA FIX ---
-    # Database se fresh 'last_msg_id' fetch kar rahe hain
-    fresh_user_data = users_col.find_one({"user_id": user_id})
-    last_sent_msg_id = fresh_user_data.get("last_msg_id") if fresh_user_data else None
+    # --- DELETE LAST SENT MESSAGE ---
+    last_sent_msg_id = user.get("last_msg_id")
 
     if last_sent_msg_id:
         try:
-            await context.bot.delete_message(chat_id=user_id, message_id=last_sent_msg_id)
+            await context.bot.delete_message(chat_id=user_id, message_id=int(last_sent_msg_id))
+            logging.info(f"Successfully deleted message ID: {last_sent_msg_id} for user: {user_id}")
         except Exception as e:
-            logging.warning(f"Could not delete message {last_sent_msg_id}: {e}")
+            logging.warning(f"Failed to delete message ID {last_sent_msg_id}: {e}")
 
-    # --- NAYI VIDEO FIND & SEND KARNA ---
+    # --- COPY AND SEND NEW VIDEO ---
     channel_id = int(channel_id_str)
     offsets = user.get("offsets", {})
     current_offset = offsets.get(channel_id_str, 1)
@@ -205,23 +208,26 @@ async def handle_next_video(update: Update, context):
                 message_id=current_offset
             )
             
-            new_credits = user["credits"] - 1
+            new_credits = user.get("credits", 20) - 1
             offsets[channel_id_str] = current_offset + 1
             
-            # DB me immediately naye message ka ID save kar rahe hain
+            # CRITICAL FIX: FORCE INT CONVERSION AND IMMEDIATE ATOMIC UPDATE TO MONGODB
+            new_msg_id = int(sent_msg.message_id)
+            
             users_col.update_one(
                 {"user_id": user_id},
                 {
                     "$set": {
-                        "last_msg_id": sent_msg.message_id,
+                        "last_msg_id": new_msg_id,
                         "credits": new_credits,
                         "offsets": offsets
                     }
                 }
             )
+            logging.info(f"Saved new message_id {new_msg_id} to DB for user {user_id}")
             video_sent = True
             break
-        except Exception:
+        except Exception as e:
             current_offset += 1
 
     if not video_sent:
