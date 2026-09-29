@@ -36,8 +36,8 @@ LINKHUB_PARAM = "verifyget30ywhahB"
 
 # Database Connection
 mongo_client = AsyncIOMotorClient(MONGO_URI)
-db = mongo_client["telegram_bot_db"]
-users_col = db["users"]
+db = mongo_client["telegram_bot_dbviral"]
+users_col = db["usersviral"]
 settings_col = db["settings"]
 
 # Telegram Application Setup
