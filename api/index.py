@@ -3,7 +3,7 @@ import logging
 import asyncio
 from datetime import datetime
 from flask import Flask, request, jsonify
-from pymongo import MongoClient
+from pymongo import MongoClient, ReturnDocument
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
@@ -146,7 +146,7 @@ async def channel_selected(update: Update, context):
 async def handle_next_video(update: Update, context):
     user_id = update.effective_user.id
     
-    # ALWAYS FETCH FRESH USER DATA DIRECTLY FROM MONGODB
+    # 1. ALWAYS FETCH FRESH USER RECORD DIRECTLY FROM DB
     user = users_col.find_one({"user_id": user_id})
     if not user:
         user = get_user_data(user_id)
@@ -182,17 +182,18 @@ async def handle_next_video(update: Update, context):
         await update.message.reply_text("Kripya pehle /start dabakar koi channel select karein.")
         return
 
-    # --- DELETE LAST SENT MESSAGE ---
+    # 2. PURANI SENT VIDEO KO DELETE KARNA (Strict Try Catch)
     last_sent_msg_id = user.get("last_msg_id")
 
     if last_sent_msg_id:
         try:
-            await context.bot.delete_message(chat_id=user_id, message_id=int(last_sent_msg_id))
-            logging.info(f"Successfully deleted message ID: {last_sent_msg_id} for user: {user_id}")
+            msg_to_delete = int(last_sent_msg_id)
+            await context.bot.delete_message(chat_id=user_id, message_id=msg_to_delete)
+            logging.info(f"Deleted previous message {msg_to_delete} for user {user_id}")
         except Exception as e:
-            logging.warning(f"Failed to delete message ID {last_sent_msg_id}: {e}")
+            logging.warning(f"Failed to delete message {last_sent_msg_id}: {e}")
 
-    # --- COPY AND SEND NEW VIDEO ---
+    # 3. NAYI VIDEO CHANNEL SE COPY KARNA
     channel_id = int(channel_id_str)
     offsets = user.get("offsets", {})
     current_offset = offsets.get(channel_id_str, 1)
@@ -211,20 +212,23 @@ async def handle_next_video(update: Update, context):
             new_credits = user.get("credits", 20) - 1
             offsets[channel_id_str] = current_offset + 1
             
-            # CRITICAL FIX: FORCE INT CONVERSION AND IMMEDIATE ATOMIC UPDATE TO MONGODB
-            new_msg_id = int(sent_msg.message_id)
-            
-            users_col.update_one(
+            # Real Bot-to-User Sent Message ID
+            sent_message_id = int(sent_msg.message_id)
+
+            # 4. ATOMIC DATABASE UPDATE (Immediate DB Lock)
+            users_col.find_one_and_update(
                 {"user_id": user_id},
                 {
                     "$set": {
-                        "last_msg_id": new_msg_id,
+                        "last_msg_id": sent_message_id,
                         "credits": new_credits,
                         "offsets": offsets
                     }
-                }
+                },
+                return_document=ReturnDocument.AFTER
             )
-            logging.info(f"Saved new message_id {new_msg_id} to DB for user {user_id}")
+
+            logging.info(f"SUCCESS: Saved sent_msg.message_id: {sent_message_id} to DB for user {user_id}")
             video_sent = True
             break
         except Exception as e:
