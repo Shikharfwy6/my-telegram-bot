@@ -270,6 +270,8 @@ setup_handlers()
 
 # --- VERCEL FLASK WEBHOOK ROUTES ---
 
+# --- VERCEL FLASK WEBHOOK ROUTES ---
+
 @app.route("/", methods=["GET"])
 def index():
     return "Bot status: Running successfully on Vercel!", 200
@@ -279,18 +281,24 @@ def webhook():
     if request.method == "POST":
         try:
             update_data = request.get_json(force=True)
+            
+            # Event Loop management for Vercel
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
             update = Update.de_json(update_data, telegram_app.bot)
 
             async def process():
-                async with telegram_app:
+                if not telegram_app._initialized:
                     await telegram_app.initialize()
-                    await telegram_app.process_update(update)
+                await telegram_app.process_update(update)
 
-            asyncio.run(process())
+            loop.run_until_complete(process())
+            loop.close()
             return "OK", 200
         except Exception as e:
-            logging.error(f"Error processing webhook update: {e}")
+            logging.error(f"Error processing webhook update: {e}", exc_info=True)
             return jsonify({"error": str(e)}), 500
 
     return "Method Not Allowed", 405
-        
+    
