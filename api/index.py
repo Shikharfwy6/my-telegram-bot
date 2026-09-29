@@ -34,7 +34,7 @@ CHANNELS = {
 LINKHUB_URL = "https://link-hub.net/9492120/ZKeea2Ckcp73"
 LINKHUB_PARAM = "verifyget30ywhahB"
 
-# --- SYNCHRONOUS DATABASE CONNECTION (Serverless Friendly) ---
+# --- SYNCHRONOUS DATABASE CONNECTION ---
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["telegram_bot_dbviral"]
 users_col = db["usersviral"]
@@ -43,7 +43,7 @@ settings_col = db["settings"]
 # Telegram Application Setup
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# Helper: Get/Initialize User (Synchronous DB calls)
+# Helper: Get/Initialize User
 def get_user_data(user_id: int):
     today_str = datetime.now().strftime("%Y-%m-%d")
     user = users_col.find_one({"user_id": user_id})
@@ -69,7 +69,7 @@ def get_user_data(user_id: int):
         )
     return user
 
-# Helper: Get Config Settings (Synchronous DB calls)
+# Helper: Get Config Settings
 def get_settings():
     settings = settings_col.find_one({"type": "verification_config"})
     if not settings:
@@ -178,19 +178,22 @@ async def handle_next_video(update: Update, context):
         await update.message.reply_text("Kripya pehle /start dabakar koi channel select karein.")
         return
 
-    channel_id = int(channel_id_str)
-    offsets = user.get("offsets", {})
-    current_offset = offsets.get(channel_id_str, 1)
-    last_sent_msg_id = user.get("last_msg_id")
+    # --- PURANI VIDEO DELETE KARNE KA FIX ---
+    # Database se fresh 'last_msg_id' fetch kar rahe hain
+    fresh_user_data = users_col.find_one({"user_id": user_id})
+    last_sent_msg_id = fresh_user_data.get("last_msg_id") if fresh_user_data else None
 
-    # Delete Purana Video
     if last_sent_msg_id:
         try:
             await context.bot.delete_message(chat_id=user_id, message_id=last_sent_msg_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"Could not delete message {last_sent_msg_id}: {e}")
 
-    # Find & Send Next Video
+    # --- NAYI VIDEO FIND & SEND KARNA ---
+    channel_id = int(channel_id_str)
+    offsets = user.get("offsets", {})
+    current_offset = offsets.get(channel_id_str, 1)
+
     video_sent = False
     max_search = current_offset + 50
 
@@ -205,6 +208,7 @@ async def handle_next_video(update: Update, context):
             new_credits = user["credits"] - 1
             offsets[channel_id_str] = current_offset + 1
             
+            # DB me immediately naye message ka ID save kar rahe hain
             users_col.update_one(
                 {"user_id": user_id},
                 {
@@ -270,8 +274,6 @@ setup_handlers()
 
 # --- VERCEL FLASK WEBHOOK ROUTES ---
 
-# --- VERCEL FLASK WEBHOOK ROUTES ---
-
 @app.route("/", methods=["GET"])
 def index():
     return "Bot status: Running successfully on Vercel!", 200
@@ -282,7 +284,6 @@ def webhook():
         try:
             update_data = request.get_json(force=True)
             
-            # Event Loop management for Vercel
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
@@ -301,4 +302,3 @@ def webhook():
             return jsonify({"error": str(e)}), 500
 
     return "Method Not Allowed", 405
-    
