@@ -137,11 +137,11 @@ async def channel_selected(update: Update, context):
     )
     
     channel_name = CHANNELS.get(channel_id, "Channel")
-    menu_keyboard = [[KeyboardButton("▶️️ Next Video")]]
+    menu_keyboard = [[KeyboardButton("▶ Next Video")]]
     reply_markup = ReplyKeyboardMarkup(menu_keyboard, resize_keyboard=True)
     
     await query.message.reply_text(
-        f"Aapne **{channel_name}** chun liya hai.\nNiche diye gaye **▶️ Next Video** button par click karein.",
+        f"Aapne **{channel_name}** chun liya hai.\nNiche diye gaye **▶ Next Video** button par click karein.",
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
@@ -149,7 +149,7 @@ async def channel_selected(update: Update, context):
 async def handle_next_video(update: Update, context):
     user_id = update.effective_user.id
     
-    # 1. READ USER DATA
+    # 1. READ USER DATA (Fresh fetch)
     user = users_col.find_one({"user_id": user_id})
     if not user:
         user = get_user_data(user_id)
@@ -185,29 +185,26 @@ async def handle_next_video(update: Update, context):
         await update.message.reply_text("Kripya pehle /start dabakar koi channel select karein.")
         return
 
-    # 2. DELETE ALL PREVIOUS SENT VIDEOS (FAST PARALLEL DELETION)
-    messages_to_delete = list(set(user.get("sent_msg_ids", [])))
-    old_single_id = user.get("last_msg_id")
+    # 2. IMMEDIATE ATOMIC FETCH & CLEAR SENT MSG QUEUE
+    # Pehle hi array database se nikalo aur clear kar do taaki repeat click par race condition na ho
+    updated_user = users_col.find_one_and_update(
+        {"user_id": user_id},
+        {"$set": {"sent_msg_ids": []}, "$unset": {"last_msg_id": ""}},
+        return_document=ReturnDocument.BEFORE
+    )
+    
+    messages_to_delete = list(set(updated_user.get("sent_msg_ids", []) if updated_user else []))
+    old_single_id = updated_user.get("last_msg_id") if updated_user else None
     if old_single_id and old_single_id not in messages_to_delete:
         messages_to_delete.append(old_single_id)
 
+    # Parallel Deletion of Previous Messages
     if messages_to_delete:
-        # Create deletion tasks to delete all previous messages simultaneously
         delete_tasks = [
             context.bot.delete_message(chat_id=user_id, message_id=int(m_id))
             for m_id in messages_to_delete
         ]
-        # Execute deletions together
         await asyncio.gather(*delete_tasks, return_exceptions=True)
-
-        # Clear queue in DB
-        users_col.update_one(
-            {"user_id": user_id},
-            {
-                "$pull": {"sent_msg_ids": {"$in": messages_to_delete}},
-                "$unset": {"last_msg_id": ""}
-            }
-        )
 
     # 3. COPY NEXT VIDEO & UPDATE DB
     channel_id = int(channel_id_str)
@@ -229,7 +226,7 @@ async def handle_next_video(update: Update, context):
             offsets[channel_id_str] = current_offset + 1
             sent_video_msg_id = int(sent_msg.message_id)
 
-            # Atomic Mongo Update
+            # Atomic Mongo Push for New Message ID
             users_col.find_one_and_update(
                 {"user_id": user_id},
                 {
@@ -292,7 +289,8 @@ def setup_handlers():
         telegram_app.add_handler(CommandHandler("todaylink", set_today_link))
         telegram_app.add_handler(CommandHandler("todaycheck", set_today_check))
         telegram_app.add_handler(CallbackQueryHandler(channel_selected, pattern="^select_chan:"))
-        telegram_app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^▶️ Next Video$"), handle_next_video))
+        # Flexible Regex match for Next Video button (Emoji and Non-Emoji both)
+        telegram_app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"^\s*▶️?\s*Next Video\s*$"), handle_next_video))
 
 setup_handlers()
 
