@@ -34,8 +34,13 @@ CHANNELS = {
 LINKHUB_URL = "https://link-hub.net/9492120/ZKeea2Ckcp73"
 LINKHUB_PARAM = "verifyget30ywhahB"
 
-# --- SYNCHRONOUS DATABASE CONNECTION ---
-mongo_client = MongoClient(MONGO_URI)
+# --- OPTIMIZED MONGO CONNECTION FOR VERCEL ---
+mongo_client = MongoClient(
+    MONGO_URI,
+    maxPoolSize=10,
+    connectTimeoutMS=5000,
+    serverSelectionTimeoutMS=5000
+)
 db = mongo_client["telegram_bot_dbviral"]
 users_col = db["usersviral"]
 settings_col = db["settings"]
@@ -56,7 +61,7 @@ def get_user_data(user_id: int):
             "phase": "FREE_20",
             "current_channel": None,
             "offsets": {},
-            "sent_msg_ids": []  # List store for multiple/fast request video IDs
+            "sent_msg_ids": []
         }
         users_col.insert_one(user)
     elif user.get("last_active_date") != today_str:
@@ -132,7 +137,7 @@ async def channel_selected(update: Update, context):
     )
     
     channel_name = CHANNELS.get(channel_id, "Channel")
-    menu_keyboard = [[KeyboardButton("▶️ Next Video")]]
+    menu_keyboard = [[KeyboardButton("▶️️ Next Video")]]
     reply_markup = ReplyKeyboardMarkup(menu_keyboard, resize_keyboard=True)
     
     await query.message.reply_text(
@@ -144,7 +149,7 @@ async def channel_selected(update: Update, context):
 async def handle_next_video(update: Update, context):
     user_id = update.effective_user.id
     
-    # 1. ALWAYS FETCH FRESH USER DATA
+    # 1. READ USER DATA
     user = users_col.find_one({"user_id": user_id})
     if not user:
         user = get_user_data(user_id)
@@ -180,30 +185,28 @@ async def handle_next_video(update: Update, context):
         await update.message.reply_text("Kripya pehle /start dabakar koi channel select karein.")
         return
 
-    # 2. DELETE ALL PREVIOUS UN-DELETED MESSAGES IN QUEUE
-    # (Pichli purani video aur 'last_msg_id' dono ko check karke clear karega)
-    messages_to_delete = user.get("sent_msg_ids", [])
+    # 2. DELETE ALL PREVIOUS SENT VIDEOS (FAST PARALLEL DELETION)
+    messages_to_delete = list(set(user.get("sent_msg_ids", [])))
     old_single_id = user.get("last_msg_id")
-    
     if old_single_id and old_single_id not in messages_to_delete:
         messages_to_delete.append(old_single_id)
 
-    deleted_successfully = []
-    for msg_id in messages_to_delete:
-        try:
-            await context.bot.delete_message(chat_id=user_id, message_id=int(msg_id))
-            deleted_successfully.append(msg_id)
-            logging.info(f"Deleted video message ID {msg_id} for user {user_id}")
-        except Exception as e:
-            # Message may already be deleted or expired
-            deleted_successfully.append(msg_id)
-            logging.warning(f"Message {msg_id} deletion skipped/failed: {e}")
+    if messages_to_delete:
+        # Create deletion tasks to delete all previous messages simultaneously
+        delete_tasks = [
+            context.bot.delete_message(chat_id=user_id, message_id=int(m_id))
+            for m_id in messages_to_delete
+        ]
+        # Execute deletions together
+        await asyncio.gather(*delete_tasks, return_exceptions=True)
 
-    # Remove deleted IDs from DB Queue atomically
-    if deleted_successfully:
+        # Clear queue in DB
         users_col.update_one(
             {"user_id": user_id},
-            {"$pull": {"sent_msg_ids": {"$in": deleted_successfully}}, "$unset": {"last_msg_id": ""}}
+            {
+                "$pull": {"sent_msg_ids": {"$in": messages_to_delete}},
+                "$unset": {"last_msg_id": ""}
+            }
         )
 
     # 3. COPY NEXT VIDEO & UPDATE DB
@@ -224,10 +227,9 @@ async def handle_next_video(update: Update, context):
             
             new_credits = user.get("credits", 20) - 1
             offsets[channel_id_str] = current_offset + 1
-            
             sent_video_msg_id = int(sent_msg.message_id)
 
-            # Push new video message ID to array queue & update credits
+            # Atomic Mongo Update
             users_col.find_one_and_update(
                 {"user_id": user_id},
                 {
@@ -305,11 +307,11 @@ def webhook():
     if request.method == "POST":
         try:
             update_data = request.get_json(force=True)
-            
+            update = Update.de_json(update_data, telegram_app.bot)
+
+            # Unified Event Loop Execution
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
-            update = Update.de_json(update_data, telegram_app.bot)
 
             async def process():
                 if not telegram_app._initialized:
