@@ -144,7 +144,7 @@ async def channel_selected(update: Update, context):
 async def handle_next_video(update: Update, context):
     user_id = update.effective_user.id
     
-    # 1. Direct Fresh Read
+    # 1. Direct Fresh Read from MongoDB
     user = users_col.find_one({"user_id": user_id})
     if not user:
         user = get_user_data(user_id)
@@ -180,18 +180,16 @@ async def handle_next_video(update: Update, context):
         await update.message.reply_text("Kripya pehle /start dabakar koi channel select karein.")
         return
 
-    # 2. PURANI VIDEO DELETE PROCESS
-    # Primary ID from DB
+    # 2. PURANI VIDEO MESSAGE DELETION (Strictly Video Message ID)
     last_sent_msg_id = user.get("last_msg_id")
 
-    # Retry Deletion logic if present
     if last_sent_msg_id:
         try:
             msg_id_del = int(last_sent_msg_id)
             await context.bot.delete_message(chat_id=user_id, message_id=msg_id_del)
-            logging.info(f"Deleted msg {msg_id_del} for user {user_id}")
+            logging.info(f"Successfully deleted video message {msg_id_del} for user {user_id}")
         except Exception as e:
-            logging.warning(f"Could not delete message {last_sent_msg_id}: {e}")
+            logging.warning(f"Could not delete video message {last_sent_msg_id}: {e}")
 
     # 3. NEXT VIDEO SEND & DB WRITE
     channel_id = int(channel_id_str)
@@ -203,6 +201,7 @@ async def handle_next_video(update: Update, context):
 
     while current_offset <= max_search:
         try:
+            # Video message sent by bot
             sent_msg = await context.bot.copy_message(
                 chat_id=user_id,
                 from_chat_id=channel_id,
@@ -212,14 +211,15 @@ async def handle_next_video(update: Update, context):
             new_credits = user.get("credits", 20) - 1
             offsets[channel_id_str] = current_offset + 1
             
-            sent_message_id = int(sent_msg.message_id)
+            # Real Sent Video Message ID
+            sent_video_msg_id = int(sent_msg.message_id)
 
-            # Atomic Mongo Update - Instant Lock
+            # Save strictly the SENT VIDEO MESSAGE ID in Mongo DB
             users_col.find_one_and_update(
                 {"user_id": user_id},
                 {
                     "$set": {
-                        "last_msg_id": sent_message_id,
+                        "last_msg_id": sent_video_msg_id,
                         "credits": new_credits,
                         "offsets": offsets
                     }
@@ -227,13 +227,7 @@ async def handle_next_video(update: Update, context):
                 return_document=ReturnDocument.AFTER
             )
 
-            # Extra Safety: Delete User's "▶️ Next Video" button trigger message to keep chat clean
-            try:
-                if update.message and update.message.message_id:
-                    await context.bot.delete_message(chat_id=user_id, message_id=update.message.message_id)
-            except Exception:
-                pass
-
+            logging.info(f"Saved video message_id {sent_video_msg_id} to DB")
             video_sent = True
             break
         except Exception:
