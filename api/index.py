@@ -87,15 +87,15 @@ def get_settings():
         settings_col.insert_one(settings)
     return settings
 
-# Safe Delete Helper Function
-async def safe_delete_video(bot, chat_id, message_id):
-    if not message_id:
+# Safe Synchronous Delete Helper
+async def delete_single_msg(bot, chat_id, msg_id):
+    if not msg_id:
         return
     try:
-        await bot.delete_message(chat_id=chat_id, message_id=int(message_id))
-        logging.info(f"Successfully deleted video message {message_id} for user {chat_id}")
+        await bot.delete_message(chat_id=chat_id, message_id=int(msg_id))
+        logging.info(f"Deleted old video ID {msg_id} for user {chat_id}")
     except Exception as e:
-        logging.warning(f"Failed to delete video message {message_id} for user {chat_id}: {e}")
+        logging.warning(f"Failed deleting message {msg_id}: {e}")
 
 # --- HANDLERS ---
 
@@ -159,12 +159,21 @@ async def channel_selected(update: Update, context):
 
 async def handle_next_video(update: Update, context):
     user_id = update.effective_user.id
-    
-    # 1. READ DB & GET PREVIOUS VIDEO IDs BEFORE CLEARING
-    user = users_col.find_one({"user_id": user_id})
+
+    # 1. ATOMIC READ & POP OLD VIDEO IDs IN ONE DB CALL
+    # Isse gap chahe 1 sec ho ya 1 min, purana ID turant extract ho jayega latency bina paida kiye
+    user = users_col.find_one_and_update(
+        {"user_id": user_id},
+        {
+            "$set": {"sent_msg_ids": []},
+            "$unset": {"last_sent_video_id": "", "last_msg_id": ""}
+        },
+        return_document=ReturnDocument.BEFORE
+    )
+
     if not user:
         user = get_user_data(user_id)
-        
+
     if user.get("credits", 0) <= 0:
         settings = get_settings()
         
@@ -196,32 +205,25 @@ async def handle_next_video(update: Update, context):
         await update.message.reply_text("Kripya pehle /start dabakar koi channel select karein.")
         return
 
-    # 2. DELETE ONLY PREVIOUS VIDEO MESSAGES (STRICTLY EXCLUDE USER TEXT)
+    # 2. MANDATORY DELETION BEFORE SENDING NEW VIDEO
     video_ids_to_delete = set()
     
-    # Append last explicit sent video ID
     if user.get("last_sent_video_id"):
         video_ids_to_delete.add(user.get("last_sent_video_id"))
-        
-    # Append any videos listed in array
-    for v_id in user.get("sent_msg_ids", []):
-        video_ids_to_delete.add(v_id)
+    if user.get("last_msg_id"):
+        video_ids_to_delete.add(user.get("last_msg_id"))
+    for vid in user.get("sent_msg_ids", []):
+        video_ids_to_delete.add(vid)
 
-    # Immediately Clear DB entries so subsequent rapid clicks don't double-process
-    users_col.update_one(
-        {"user_id": user_id},
-        {"$set": {"sent_msg_ids": [], "last_sent_video_id": None}}
-    )
-
-    # Parallel Deletion Execution for ONLY Video IDs
     if video_ids_to_delete:
         delete_tasks = [
-            safe_delete_video(context.bot, user_id, vid)
+            delete_single_msg(context.bot, user_id, vid)
             for vid in video_ids_to_delete
         ]
-        await asyncio.gather(*delete_tasks)
+        # Wait strictly until previous video deletion completes
+        await asyncio.gather(*delete_tasks, return_exceptions=True)
 
-    # 3. COPY NEXT VIDEO & UPDATE DB WITH EXACT NEW VIDEO ID
+    # 3. SEND NEW VIDEO & WRITE FRESH ID TO MONGO
     channel_id = int(channel_id_str)
     offsets = user.get("offsets", {})
     current_offset = offsets.get(channel_id_str, 1)
@@ -241,7 +243,7 @@ async def handle_next_video(update: Update, context):
             offsets[channel_id_str] = current_offset + 1
             sent_video_msg_id = int(sent_msg.message_id)
 
-            # Save the new video message ID specifically in DB
+            # Atomic Mongo Write for exact new message
             users_col.update_one(
                 {"user_id": user_id},
                 {
@@ -254,7 +256,7 @@ async def handle_next_video(update: Update, context):
                 }
             )
 
-            logging.info(f"Successfully sent and queued video_msg_id {sent_video_msg_id}")
+            logging.info(f"Sent and recorded new video ID: {sent_video_msg_id}")
             video_sent = True
             break
         except Exception:
