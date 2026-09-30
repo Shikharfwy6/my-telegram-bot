@@ -43,7 +43,7 @@ settings_col = db["settings"]
 # Telegram Application Setup
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# Helper: Get/Initialize User Data directly from DB
+# Helper: Get/Initialize User Data
 def get_user_data(user_id: int):
     today_str = datetime.now().strftime("%Y-%m-%d")
     user = users_col.find_one({"user_id": user_id})
@@ -92,7 +92,6 @@ async def start(update: Update, context):
         start_param = args[0]
         settings = get_settings()
         
-        # VPLink Verification check
         if start_param == settings.get("vplink_param"):
             users_col.update_one(
                 {"user_id": user_id},
@@ -101,7 +100,6 @@ async def start(update: Update, context):
             await update.message.reply_text("✅ **VPLink Verification Successful!**\nAapko **30 videos** ka access mil gaya hai.")
             return
 
-        # Link-Hub Verification check
         if start_param == LINKHUB_PARAM:
             users_col.update_one(
                 {"user_id": user_id},
@@ -146,7 +144,7 @@ async def channel_selected(update: Update, context):
 async def handle_next_video(update: Update, context):
     user_id = update.effective_user.id
     
-    # 1. ALWAYS FETCH FRESH USER RECORD DIRECTLY FROM DB
+    # 1. Direct Fresh Read
     user = users_col.find_one({"user_id": user_id})
     if not user:
         user = get_user_data(user_id)
@@ -182,18 +180,20 @@ async def handle_next_video(update: Update, context):
         await update.message.reply_text("Kripya pehle /start dabakar koi channel select karein.")
         return
 
-    # 2. PURANI SENT VIDEO KO DELETE KARNA (Strict Try Catch)
+    # 2. PURANI VIDEO DELETE PROCESS
+    # Primary ID from DB
     last_sent_msg_id = user.get("last_msg_id")
 
+    # Retry Deletion logic if present
     if last_sent_msg_id:
         try:
-            msg_to_delete = int(last_sent_msg_id)
-            await context.bot.delete_message(chat_id=user_id, message_id=msg_to_delete)
-            logging.info(f"Deleted previous message {msg_to_delete} for user {user_id}")
+            msg_id_del = int(last_sent_msg_id)
+            await context.bot.delete_message(chat_id=user_id, message_id=msg_id_del)
+            logging.info(f"Deleted msg {msg_id_del} for user {user_id}")
         except Exception as e:
-            logging.warning(f"Failed to delete message {last_sent_msg_id}: {e}")
+            logging.warning(f"Could not delete message {last_sent_msg_id}: {e}")
 
-    # 3. NAYI VIDEO CHANNEL SE COPY KARNA
+    # 3. NEXT VIDEO SEND & DB WRITE
     channel_id = int(channel_id_str)
     offsets = user.get("offsets", {})
     current_offset = offsets.get(channel_id_str, 1)
@@ -212,10 +212,9 @@ async def handle_next_video(update: Update, context):
             new_credits = user.get("credits", 20) - 1
             offsets[channel_id_str] = current_offset + 1
             
-            # Real Bot-to-User Sent Message ID
             sent_message_id = int(sent_msg.message_id)
 
-            # 4. ATOMIC DATABASE UPDATE (Immediate DB Lock)
+            # Atomic Mongo Update - Instant Lock
             users_col.find_one_and_update(
                 {"user_id": user_id},
                 {
@@ -228,10 +227,16 @@ async def handle_next_video(update: Update, context):
                 return_document=ReturnDocument.AFTER
             )
 
-            logging.info(f"SUCCESS: Saved sent_msg.message_id: {sent_message_id} to DB for user {user_id}")
+            # Extra Safety: Delete User's "▶️ Next Video" button trigger message to keep chat clean
+            try:
+                if update.message and update.message.message_id:
+                    await context.bot.delete_message(chat_id=user_id, message_id=update.message.message_id)
+            except Exception:
+                pass
+
             video_sent = True
             break
-        except Exception as e:
+        except Exception:
             current_offset += 1
 
     if not video_sent:
