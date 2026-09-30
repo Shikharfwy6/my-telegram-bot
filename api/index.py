@@ -26,9 +26,18 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 # Channels List (-100... ID format)
 CHANNELS = {
-    "-1004469752383": "1",
-    "-1004446913778": "2",
-    "-1004426647894": "3"
+    "-1004469752383": "cosplay",
+    "-1004446913778": "teeny",
+    "-1004426647894": "chinese av",
+    "-1003733602008":"aunty judy",
+    "-1003909539492":"transangell",
+    "-1004372390753":"cuckold",
+    "-1003904347191":"deeper",
+    "-1004422972425":"mlif only",
+    "-1004384588902":"miya Khalifa",
+    "-1003814470304":"lesbian girl short video",
+    "-1004448137605":"prev mom",
+    "-1004438167829":"faciall abvse",
 }
 
 LINKHUB_URL = "https://link-hub.net/9492120/ZKeea2Ckcp73"
