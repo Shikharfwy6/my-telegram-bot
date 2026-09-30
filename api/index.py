@@ -38,6 +38,17 @@ CHANNELS = {
     "-1003814470304":"lesbian girl short video",
     "-1004448137605":"prev mom",
     "-1004438167829":"faciall abvse",
+    "-1004424185925":"kink wipppeddd",
+    "-1003942855264":"mon son",
+    "-1004416265673":"diper girl",
+    "-1004291109813":"western part 1",
+    "-1004385500716":"fistingbr",
+    "-1004481958270":"hot she male",
+    "-1004217990146":"girl cum",
+    "-1004397104349":"sexy",
+    "":"",
+    "":"",
+    "":"",
 }
 
 LINKHUB_URL = "https://link-hub.net/9492120/ZKeea2Ckcp73"
