@@ -56,7 +56,7 @@ def get_user_data(user_id: int):
             "phase": "FREE_20",
             "current_channel": None,
             "offsets": {},
-            "last_msg_id": None
+            "sent_msg_ids": []  # List store for multiple/fast request video IDs
         }
         users_col.insert_one(user)
     elif user.get("last_active_date") != today_str:
@@ -144,7 +144,7 @@ async def channel_selected(update: Update, context):
 async def handle_next_video(update: Update, context):
     user_id = update.effective_user.id
     
-    # 1. Direct Fresh Read from MongoDB
+    # 1. ALWAYS FETCH FRESH USER DATA
     user = users_col.find_one({"user_id": user_id})
     if not user:
         user = get_user_data(user_id)
@@ -180,18 +180,33 @@ async def handle_next_video(update: Update, context):
         await update.message.reply_text("Kripya pehle /start dabakar koi channel select karein.")
         return
 
-    # 2. PURANI VIDEO MESSAGE DELETION (Strictly Video Message ID)
-    last_sent_msg_id = user.get("last_msg_id")
+    # 2. DELETE ALL PREVIOUS UN-DELETED MESSAGES IN QUEUE
+    # (Pichli purani video aur 'last_msg_id' dono ko check karke clear karega)
+    messages_to_delete = user.get("sent_msg_ids", [])
+    old_single_id = user.get("last_msg_id")
+    
+    if old_single_id and old_single_id not in messages_to_delete:
+        messages_to_delete.append(old_single_id)
 
-    if last_sent_msg_id:
+    deleted_successfully = []
+    for msg_id in messages_to_delete:
         try:
-            msg_id_del = int(last_sent_msg_id)
-            await context.bot.delete_message(chat_id=user_id, message_id=msg_id_del)
-            logging.info(f"Successfully deleted video message {msg_id_del} for user {user_id}")
+            await context.bot.delete_message(chat_id=user_id, message_id=int(msg_id))
+            deleted_successfully.append(msg_id)
+            logging.info(f"Deleted video message ID {msg_id} for user {user_id}")
         except Exception as e:
-            logging.warning(f"Could not delete video message {last_sent_msg_id}: {e}")
+            # Message may already be deleted or expired
+            deleted_successfully.append(msg_id)
+            logging.warning(f"Message {msg_id} deletion skipped/failed: {e}")
 
-    # 3. NEXT VIDEO SEND & DB WRITE
+    # Remove deleted IDs from DB Queue atomically
+    if deleted_successfully:
+        users_col.update_one(
+            {"user_id": user_id},
+            {"$pull": {"sent_msg_ids": {"$in": deleted_successfully}}, "$unset": {"last_msg_id": ""}}
+        )
+
+    # 3. COPY NEXT VIDEO & UPDATE DB
     channel_id = int(channel_id_str)
     offsets = user.get("offsets", {})
     current_offset = offsets.get(channel_id_str, 1)
@@ -201,7 +216,6 @@ async def handle_next_video(update: Update, context):
 
     while current_offset <= max_search:
         try:
-            # Video message sent by bot
             sent_msg = await context.bot.copy_message(
                 chat_id=user_id,
                 from_chat_id=channel_id,
@@ -211,15 +225,14 @@ async def handle_next_video(update: Update, context):
             new_credits = user.get("credits", 20) - 1
             offsets[channel_id_str] = current_offset + 1
             
-            # Real Sent Video Message ID
             sent_video_msg_id = int(sent_msg.message_id)
 
-            # Save strictly the SENT VIDEO MESSAGE ID in Mongo DB
+            # Push new video message ID to array queue & update credits
             users_col.find_one_and_update(
                 {"user_id": user_id},
                 {
+                    "$push": {"sent_msg_ids": sent_video_msg_id},
                     "$set": {
-                        "last_msg_id": sent_video_msg_id,
                         "credits": new_credits,
                         "offsets": offsets
                     }
@@ -227,7 +240,7 @@ async def handle_next_video(update: Update, context):
                 return_document=ReturnDocument.AFTER
             )
 
-            logging.info(f"Saved video message_id {sent_video_msg_id} to DB")
+            logging.info(f"Successfully sent and queued video_msg_id {sent_video_msg_id}")
             video_sent = True
             break
         except Exception:
