@@ -3,7 +3,7 @@ import logging
 import asyncio
 from datetime import datetime
 from flask import Flask, request, jsonify
-from pymongo import MongoClient, ReturnDocument
+from pymongo import MongoClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
@@ -185,15 +185,13 @@ async def handle_next_video(update: Update, context):
         await update.message.reply_text("Kripya pehle /start dabakar koi channel select karein.")
         return
 
-    # 2. STRICTLY DELETE PREVIOUS MESSAGES BEFORE ANYTHING ELSE
-    # Grab all stored message IDs
+    # 2. DELETE PREVIOUS MESSAGES STRICTLY
     old_ids = list(set(user.get("sent_msg_ids", [])))
     if user.get("last_sent_video_id") and user.get("last_sent_video_id") not in old_ids:
         old_ids.append(user.get("last_sent_video_id"))
     if user.get("last_msg_id") and user.get("last_msg_id") not in old_ids:
         old_ids.append(user.get("last_msg_id"))
 
-    # Execute sync deletion strictly
     for msg_id in old_ids:
         try:
             await context.bot.delete_message(chat_id=user_id, message_id=int(msg_id))
@@ -201,7 +199,7 @@ async def handle_next_video(update: Update, context):
         except Exception as e:
             logging.warning(f"Could not delete message ID {msg_id}: {e}")
 
-    # Immediately Clear IDs from Mongo so we don't try deleting them again
+    # Clear old IDs from Mongo
     users_col.update_one(
         {"user_id": user_id},
         {
@@ -210,7 +208,7 @@ async def handle_next_video(update: Update, context):
         }
     )
 
-    # 3. SEND NEW VIDEO & SAVE NEW ID
+    # 3. SEND NEW VIDEO WITH FORWARD PROTECTION ENABLED
     channel_id = int(channel_id_str)
     offsets = user.get("offsets", {})
     current_offset = offsets.get(channel_id_str, 1)
@@ -220,10 +218,12 @@ async def handle_next_video(update: Update, context):
 
     while current_offset <= max_search:
         try:
+            # Added protect_content=True to restrict forwarding & saving
             sent_msg = await context.bot.copy_message(
                 chat_id=user_id,
                 from_chat_id=channel_id,
-                message_id=current_offset
+                message_id=current_offset,
+                protect_content=True
             )
             
             new_credits = user.get("credits", 20) - 1
@@ -243,7 +243,7 @@ async def handle_next_video(update: Update, context):
                 }
             )
 
-            logging.info(f"Sent and recorded new video ID: {sent_video_msg_id}")
+            logging.info(f"Sent and recorded protected video ID: {sent_video_msg_id}")
             video_sent = True
             break
         except Exception as e:
@@ -298,7 +298,7 @@ def setup_handlers():
 
 setup_handlers()
 
-# --- VERCEL FLASK WEBHOOK ROUTES WITH FULL ASYNC LIFECYCLE ---
+# --- VERCEL FLASK WEBHOOK ROUTES ---
 
 @app.route("/", methods=["GET"])
 def index():
