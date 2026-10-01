@@ -228,7 +228,7 @@ async def handle_next_video(update: Update, context):
         }
     )
 
-    # 3. SEND NEW VIDEO WITH FORWARD PROTECTION ENABLED
+    # 3. SEND NEW VIDEO WITH REPEAT LOGIC
     channel_id = int(channel_id_str)
     offsets = user.get("offsets", {})
     current_offset = offsets.get(channel_id_str, 1)
@@ -238,7 +238,6 @@ async def handle_next_video(update: Update, context):
 
     while current_offset <= max_search:
         try:
-            # Added protect_content=True to restrict forwarding & saving
             sent_msg = await context.bot.copy_message(
                 chat_id=user_id,
                 from_chat_id=channel_id,
@@ -263,17 +262,22 @@ async def handle_next_video(update: Update, context):
                 }
             )
 
-            logging.info(f"Sent and recorded protected video ID: {sent_video_msg_id}")
+            logging.info(f"Sent and recorded video ID: {sent_video_msg_id}")
             video_sent = True
             break
         except Exception as e:
             logging.warning(f"Failed copying offset {current_offset}: {e}")
             current_offset += 1
 
+    # --- REPEAT LOGIC ADDED HERE ---
     if not video_sent:
-        offsets[channel_id_str] = current_offset
+        # End reached: Offset ko firse 1 par reset karo
+        offsets[channel_id_str] = 1
         users_col.update_one({"user_id": user_id}, {"$set": {"offsets": offsets}})
-        await update.message.reply_text("Is channel me filhal aur koi naya video nahi mila.")
+        
+        await update.message.reply_text(
+            "🔄 **Is channel ke saare videos khatam ho gaye hain!**\n\nDobara dekhte rehne ke liye phir se **▶ Next Video** par click karein (videos shuru se repeat honge)."
+        )
 
 async def set_today_link(update: Update, context):
     if update.effective_user.id != ADMIN_ID:
