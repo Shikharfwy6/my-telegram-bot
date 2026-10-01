@@ -443,6 +443,8 @@ setup_handlers()
 
 # --- VERCEL FLASK WEBHOOK ROUTES ---
 
+# --- FIXED VERCEL FLASK WEBHOOK ROUTE ---
+
 @app.route("/", methods=["GET"])
 def index():
     return "Bot status: Running successfully on Vercel!", 200
@@ -454,11 +456,11 @@ def webhook():
             update_data = request.get_json(force=True)
             
             async def process_update_async():
-                async with telegram_app:
-                    await telegram_app.start()
-                    update = Update.de_json(update_data, telegram_app.bot)
-                    await telegram_app.process_update(update)
-                    await telegram_app.stop()
+                # Correct Serverless Execution Flow:
+                await telegram_app.initialize()
+                update = Update.de_json(update_data, telegram_app.bot)
+                await telegram_app.process_update(update)
+                await telegram_app.shutdown()
 
             asyncio.run(process_update_async())
             return "OK", 200
