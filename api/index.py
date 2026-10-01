@@ -293,7 +293,6 @@ async def handle_next_video(update: Update, context):
         )
 
 # --- BULK CHANNEL / TOPIC AUTO-ADD HANDLER ---
-
 async def handle_direct_add(update: Update, context):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
@@ -301,9 +300,29 @@ async def handle_direct_add(update: Update, context):
 
     text = update.message.text.strip()
 
-    # 1. JSON Dictionary Format (Multiple Channels)
+    # 1. Single Channel Format Check: "-1004432776763 Name Here"
+    single_channel_pattern = r"^(-100\d+|\d+)\s+(.+)$"
+    single_match = re.match(single_channel_pattern, text)
+    if single_match and not text.startswith("{"):
+        chat_id_str = single_match.group(1).strip()
+        name_str = single_match.group(2).strip()
+
+        sources_col.update_one(
+            {"type": "channel", "chat_id": chat_id_str},
+            {"$set": {"type": "channel", "chat_id": chat_id_str, "name": name_str}},
+            upsert=True
+        )
+
+        await update.message.reply_text(
+            f"✅ **Channel Successfully Added!**\n\n"
+            f"📌 **Name:** {name_str}\n"
+            f"🆔 **Chat ID:** `{chat_id_str}`",
+            parse_mode="Markdown"
+        )
+        return
+
+    # 2. JSON Dictionary Format (Multiple Bulk Channels)
     try:
-        # Regex to handle invalid trailing commas inside JSON like {"key": "val",}
         cleaned_text = re.sub(r',\s*([}\]])', r'\1', text)
         data = json.loads(cleaned_text)
 
@@ -311,7 +330,7 @@ async def handle_direct_add(update: Update, context):
             added_count = 0
             for chat_id, name in data.items():
                 chat_id_str = str(chat_id).strip()
-                name_str = str(name).strip()  # Preserves spaces between names
+                name_str = str(name).strip()
 
                 sources_col.update_one(
                     {"type": "channel", "chat_id": chat_id_str},
@@ -326,10 +345,9 @@ async def handle_direct_add(update: Update, context):
             )
             return
     except json.JSONDecodeError:
-        pass  # Text JSON format nahi hai, skip to Topic regex check
+        pass
 
-    # 2. Topic Link Format
-    # Example: https://t.me/c/4412223111/9/10 Category Name
+    # 3. Topic Link Format Check
     pattern = r"https://t\.me/c/(\d+)/(\d+)/(\d+)\s+(.+)"
     match = re.match(pattern, text)
 
@@ -361,6 +379,8 @@ async def handle_direct_add(update: Update, context):
             f"🎬 **Start Video ID:** `{start_msg_id}`",
             parse_mode="Markdown"
         )
+
+
 
 async def list_sources(update: Update, context):
     if update.effective_user.id != ADMIN_ID:
