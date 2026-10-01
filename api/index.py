@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import logging
 import asyncio
 from datetime import datetime
@@ -234,7 +235,7 @@ async def handle_next_video(update: Update, context):
         }
     )
 
-    # 3. SEND NEW VIDEO WITH TOPIC START OFFSET
+    # 3. SEND NEW VIDEO WITH OFFSET
     parts = source_key.split(":")
     chat_id_str = parts[1]
     chat_id = int(chat_id_str)
@@ -249,7 +250,7 @@ async def handle_next_video(update: Update, context):
     current_offset = offsets.get(source_key, default_start)
 
     video_sent = False
-    max_search = current_offset + 200  # Checked up to 200 gaps
+    max_search = current_offset + 200
 
     while current_offset <= max_search:
         try:
@@ -283,7 +284,6 @@ async def handle_next_video(update: Update, context):
             logging.warning(f"Failed copying offset {current_offset}: {e}")
             current_offset += 1
 
-    # End reached: Reset offset back to default_start
     if not video_sent:
         offsets[source_key] = default_start
         users_col.update_one({"user_id": user_id}, {"$set": {"offsets": offsets}})
@@ -292,16 +292,46 @@ async def handle_next_video(update: Update, context):
             "🔄 **Is category ke saare videos khatam ho gaye hain!**\n\nDobara dekhte rehne ke liye phir se **▶ Next Video** par click karein (videos shuru se repeat honge)."
         )
 
-# --- DIRECT LINK AUTO-ADD HANDLER (WITHOUT SLASH COMMAND) ---
+# --- BULK CHANNEL / TOPIC AUTO-ADD HANDLER ---
 
-async def handle_direct_link_add(update: Update, context):
+async def handle_direct_add(update: Update, context):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
         return
 
     text = update.message.text.strip()
-    
-    # Regex Pattern to match t.me/c links with name: https://t.me/c/4412223111/9/10 Category Name
+
+    # 1. JSON Dictionary Format (Multiple Channels)
+    # Example:
+    # {
+    #   "-1004469752383": "1",
+    #   "-1004446913778": "teeny"
+    # }
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            added_count = 0
+            for chat_id, name in data.items():
+                chat_id_str = str(chat_id).strip()
+                name_str = str(name).strip()
+
+                sources_col.update_one(
+                    {"type": "channel", "chat_id": chat_id_str},
+                    {"$set": {"type": "channel", "chat_id": chat_id_str, "name": name_str}},
+                    upsert=True
+                )
+                added_count += 1
+
+            await update.message.reply_text(
+                f"✅ **{added_count} Channels successfully added/updated!**",
+                parse_mode="Markdown"
+            )
+            return
+    except json.JSONDecodeError:
+        pass  # Not JSON, move to Topic regex check
+
+    # 2. Topic Link Format
+    # Example: https://t.me/c/4412223111/9/10 Category Name
     pattern = r"https://t\.me/c/(\d+)/(\d+)/(\d+)\s+(.+)"
     match = re.match(pattern, text)
 
@@ -311,7 +341,6 @@ async def handle_direct_link_add(update: Update, context):
         start_msg_id = int(match.group(3))
         category_name = match.group(4).strip()
 
-        # Add -100 prefix for Telegram private supergroup ID
         group_id = f"-100{raw_group_id}"
 
         sources_col.update_one(
@@ -327,7 +356,7 @@ async def handle_direct_link_add(update: Update, context):
         )
 
         await update.message.reply_text(
-            f"✅ **Category Successfully Added!**\n\n"
+            f"✅ **Topic/Category Successfully Added!**\n\n"
             f"📌 **Name:** {category_name}\n"
             f"🆔 **Group ID:** `{group_id}`\n"
             f"🧵 **Topic ID:** `{topic_id}`\n"
@@ -344,7 +373,7 @@ async def list_sources(update: Update, context):
         await update.message.reply_text("Koi bhi Category added nahi hai.")
         return
 
-    text = "📋 **Added Categories:**\n\n"
+    text = "📋 **Added Channels & Topics:**\n\n"
     for s in sources:
         if s["type"] == "channel":
             text += f"📢 **Channel:** {s['name']}\n`ID: {s['chat_id']}`\n\n"
@@ -407,8 +436,8 @@ def setup_handlers():
         telegram_app.add_handler(CallbackQueryHandler(source_selected, pattern="^sel_src:"))
         telegram_app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r".*Next Video.*"), handle_next_video))
         
-        # Automatic Link Detection for Admin
-        telegram_app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"https://t\.me/c/"), handle_direct_link_add))
+        # Combined Bulk Channel JSON & Direct Topic Link Auto-Detection
+        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_direct_add))
 
 setup_handlers()
 
