@@ -302,18 +302,16 @@ async def handle_direct_add(update: Update, context):
     text = update.message.text.strip()
 
     # 1. JSON Dictionary Format (Multiple Channels)
-    # Example:
-    # {
-    #   "-1004469752383": "1",
-    #   "-1004446913778": "teeny"
-    # }
     try:
-        data = json.loads(text)
+        # Regex to handle invalid trailing commas inside JSON like {"key": "val",}
+        cleaned_text = re.sub(r',\s*([}\]])', r'\1', text)
+        data = json.loads(cleaned_text)
+
         if isinstance(data, dict):
             added_count = 0
             for chat_id, name in data.items():
                 chat_id_str = str(chat_id).strip()
-                name_str = str(name).strip()
+                name_str = str(name).strip()  # Preserves spaces between names
 
                 sources_col.update_one(
                     {"type": "channel", "chat_id": chat_id_str},
@@ -328,7 +326,7 @@ async def handle_direct_add(update: Update, context):
             )
             return
     except json.JSONDecodeError:
-        pass  # Not JSON, move to Topic regex check
+        pass  # Text JSON format nahi hai, skip to Topic regex check
 
     # 2. Topic Link Format
     # Example: https://t.me/c/4412223111/9/10 Category Name
@@ -436,14 +434,12 @@ def setup_handlers():
         telegram_app.add_handler(CallbackQueryHandler(source_selected, pattern="^sel_src:"))
         telegram_app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r".*Next Video.*"), handle_next_video))
         
-        # Combined Bulk Channel JSON & Direct Topic Link Auto-Detection
+        # Bulk Channels JSON & Topics Auto-Add Handler
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_direct_add))
 
 setup_handlers()
 
 # --- VERCEL FLASK WEBHOOK ROUTES ---
-
-# --- FIXED VERCEL FLASK WEBHOOK ROUTE ---
 
 @app.route("/", methods=["GET"])
 def index():
@@ -456,7 +452,6 @@ def webhook():
             update_data = request.get_json(force=True)
             
             async def process_update_async():
-                # Correct Serverless Execution Flow:
                 await telegram_app.initialize()
                 update = Update.de_json(update_data, telegram_app.bot)
                 await telegram_app.process_update(update)
