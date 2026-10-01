@@ -46,9 +46,6 @@ CHANNELS = {
     "-1004481958270":"hot she male",
     "-1004217990146":"girl cum",
     "-1004397104349":"sexy",
-    "":"",
-    "":"",
-    "":"",
 }
 
 LINKHUB_URL = "https://link-hub.net/9492120/ZKeea2Ckcp73"
@@ -68,7 +65,7 @@ settings_col = db["settings"]
 # Telegram Application Setup
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# Helper: Get/Initialize User Data
+# Helper: Get/Initialize User Data with Daily Reset
 def get_user_data(user_id: int):
     today_str = datetime.now().strftime("%Y-%m-%d")
     user = users_col.find_one({"user_id": user_id})
@@ -85,12 +82,17 @@ def get_user_data(user_id: int):
         }
         users_col.insert_one(user)
     elif user.get("last_active_date") != today_str:
+        # HAR NAYE DIN SAB KUCH RESET HOGA
         user["last_active_date"] = today_str
         user["credits"] = 20
         user["phase"] = "FREE_20"
         users_col.update_one(
             {"user_id": user_id},
-            {"$set": {"last_active_date": today_str, "credits": 20, "phase": "FREE_20"}}
+            {"$set": {
+                "last_active_date": today_str, 
+                "credits": 20, 
+                "phase": "FREE_20"
+            }}
         )
     return user
 
@@ -117,6 +119,7 @@ async def start(update: Update, context):
         start_param = args[0]
         settings = get_settings()
         
+        # 1. VPLink Verification Handler (Unlocks 30 Videos)
         if start_param == settings.get("vplink_param"):
             users_col.update_one(
                 {"user_id": user_id},
@@ -125,6 +128,7 @@ async def start(update: Update, context):
             await update.message.reply_text("✅ **VPLink Verification Successful!**\nAapko **30 videos** ka access mil gaya hai.")
             return
 
+        # 2. Link-Hub Verification Handler (Unlocks 10 Extra Videos)
         if start_param == LINKHUB_PARAM:
             users_col.update_one(
                 {"user_id": user_id},
@@ -169,32 +173,44 @@ async def channel_selected(update: Update, context):
 async def handle_next_video(update: Update, context):
     user_id = update.effective_user.id
 
-    # 1. FETCH USER DATA DIRECTLY
-    user = users_col.find_one({"user_id": user_id})
-    if not user:
-        user = get_user_data(user_id)
+    # 1. FETCH USER DATA & VERIFY DAILY RESET
+    user = get_user_data(user_id)
 
+    # 2. CHECK LIMITS & PHASES
     if user.get("credits", 0) <= 0:
         settings = get_settings()
+        current_phase = user.get("phase", "FREE_20")
         
-        if user.get("phase") in ["FREE_20", "NEED_VPLINK"]:
+        # Step A: 20 Free Credits Over -> Ask for VPLink
+        if current_phase in ["FREE_20", "NEED_VPLINK"]:
             vplink = settings.get("vplink_url", "https://vplink.in/M44")
             users_col.update_one({"user_id": user_id}, {"$set": {"phase": "NEED_VPLINK"}})
             
             keyboard = [[InlineKeyboardButton("🔗 Verify on VPLink", url=vplink)]]
             await update.message.reply_text(
-                "❌ **Aapki 20 Free Videos ki limit khatam ho chuki hai!**\n\nAage 30 videos dekhne ke liye niche diye gaye link se verification poora karein:",
+                "❌ **Aapki 20 Free Videos ki limit khatam ho chuki hai!**\n\nAage 30 videos dekhne ke liye niche diye gaye VPLink se verification poora karein:",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
             return
 
-        elif user.get("phase") in ["VERIFIED_30", "NEED_LINKHUB", "EXTRA_10"]:
+        # Step B: 30 VPLink Credits Over -> Ask for Link-Hub
+        elif current_phase in ["VERIFIED_30", "NEED_LINKHUB"]:
             users_col.update_one({"user_id": user_id}, {"$set": {"phase": "NEED_LINKHUB"}})
             
             keyboard = [[InlineKeyboardButton("🔗 Verify on Link-Hub", url=LINKHUB_URL)]]
             await update.message.reply_text(
-                "❌ **Aapki video limit khatam ho gayi hai!**\n\nAage 10 aur videos unlock karne ke liye verification complete karein:",
+                "❌ **Aapki 30 Videos ki limit khatam ho gayi hai!**\n\nAage 10 extra videos unlock karne ke liye Link-Hub verification complete karein:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            return
+
+        # Step C: Extra 10 Credits Over -> Ask for Link-Hub again (Loop for rest of the day)
+        elif current_phase in ["EXTRA_10"]:
+            keyboard = [[InlineKeyboardButton("🔗 Verify on Link-Hub", url=LINKHUB_URL)]]
+            await update.message.reply_text(
+                "❌ **Aapki 10 Extra Videos ki limit khatam ho gayi hai!**\n\n10 aur videos unlock karne ke liye dobara Link-Hub verify karein:",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
@@ -205,7 +221,7 @@ async def handle_next_video(update: Update, context):
         await update.message.reply_text("Kripya pehle /start dabakar koi channel select karein.")
         return
 
-    # 2. DELETE PREVIOUS MESSAGES STRICTLY
+    # 3. DELETE PREVIOUS MESSAGES STRICTLY
     old_ids = list(set(user.get("sent_msg_ids", [])))
     if user.get("last_sent_video_id") and user.get("last_sent_video_id") not in old_ids:
         old_ids.append(user.get("last_sent_video_id"))
@@ -228,7 +244,7 @@ async def handle_next_video(update: Update, context):
         }
     )
 
-    # 3. SEND NEW VIDEO WITH REPEAT LOGIC
+    # 4. SEND NEW VIDEO WITH REPEAT LOGIC
     channel_id = int(channel_id_str)
     offsets = user.get("offsets", {})
     current_offset = offsets.get(channel_id_str, 1)
@@ -269,9 +285,8 @@ async def handle_next_video(update: Update, context):
             logging.warning(f"Failed copying offset {current_offset}: {e}")
             current_offset += 1
 
-    # --- REPEAT LOGIC ADDED HERE ---
+    # End reached: Offset ko firse 1 par reset karo
     if not video_sent:
-        # End reached: Offset ko firse 1 par reset karo
         offsets[channel_id_str] = 1
         users_col.update_one({"user_id": user_id}, {"$set": {"offsets": offsets}})
         
