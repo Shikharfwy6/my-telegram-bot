@@ -48,7 +48,7 @@ CHANNELS = {
     "-1004397104349":"sexy",
 }
 
-LINKHUB_URL = "https://link-hub.net/9492120/ZKeea2Ckcp73"
+LINKHUB_URL = "https://link-target.net/9492120/cJDe6fkzGXrl"
 LINKHUB_PARAM = "verifyget30ywhahB"
 
 # --- MONGO CONNECTION ---
@@ -74,8 +74,8 @@ def get_user_data(user_id: int):
         user = {
             "user_id": user_id,
             "last_active_date": today_str,
-            "credits": 20,
-            "phase": "FREE_20",
+            "credits": 7,
+            "phase": "FREE_7",
             "current_channel": None,
             "offsets": {},
             "sent_msg_ids": []
@@ -84,14 +84,14 @@ def get_user_data(user_id: int):
     elif user.get("last_active_date") != today_str:
         # HAR NAYE DIN SAB KUCH RESET HOGA
         user["last_active_date"] = today_str
-        user["credits"] = 20
-        user["phase"] = "FREE_20"
+        user["credits"] = 7
+        user["phase"] = "FREE_7"
         users_col.update_one(
             {"user_id": user_id},
             {"$set": {
                 "last_active_date": today_str, 
-                "credits": 20, 
-                "phase": "FREE_20"
+                "credits": 7, 
+                "phase": "FREE_7"
             }}
         )
     return user
@@ -182,13 +182,13 @@ async def handle_next_video(update: Update, context):
         current_phase = user.get("phase", "FREE_20")
         
         # Step A: 20 Free Credits Over -> Ask for VPLink
-        if current_phase in ["FREE_20", "NEED_VPLINK"]:
+        if current_phase in ["FREE_7", "NEED_VPLINK"]:
             vplink = settings.get("vplink_url", "https://vplink.in/M44")
             users_col.update_one({"user_id": user_id}, {"$set": {"phase": "NEED_VPLINK"}})
             
             keyboard = [[InlineKeyboardButton("🔗 Verify on VPLink", url=vplink)]]
             await update.message.reply_text(
-                "❌ **Aapki 20 Free Videos ki limit khatam ho chuki hai!**\n\nAage 30 videos dekhne ke liye niche diye gaye VPLink se verification poora karein:",
+                "❌ **Aapki 7 Free Videos ki limit khatam ho chuki hai!**\n\nAage 30 videos dekhne ke liye niche diye gaye VPLink se verification poora karein:",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
