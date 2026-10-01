@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import asyncio
 from datetime import datetime
@@ -42,7 +43,7 @@ sources_col = db["sources"]  # Dynamic Channels & Topics collection
 # Telegram Application Setup
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# Helper: Get/Initialize User Data
+# Helper: Get/Initialize User Data with Daily Reset (7 FREE CREDITS)
 def get_user_data(user_id: int):
     today_str = datetime.now().strftime("%Y-%m-%d")
     user = users_col.find_one({"user_id": user_id})
@@ -53,7 +54,7 @@ def get_user_data(user_id: int):
             "last_active_date": today_str,
             "credits": 7,
             "phase": "FREE_20",
-            "current_source": None,  # Can be Channel or Topic key
+            "current_source": None,
             "offsets": {},
             "sent_msg_ids": []
         }
@@ -111,11 +112,11 @@ async def start(update: Update, context):
             await update.message.reply_text("✅ **Link-Hub Verification Successful!**\nAapko **10 extra videos** ka access mil gaya hai.")
             return
 
-    # Fetch dynamic channels and topics from Mongo
+    # Fetch dynamic categories/topics/channels from Mongo
     sources = list(sources_col.find({}))
     
     if not sources:
-        await update.message.reply_text("Abhi tak koi Category/Channel add nahi kiya gaya hai. Admin se sampark karein.")
+        await update.message.reply_text("Abhi tak koi Category add nahi ki gayi hai. Admin se sampark karein.")
         return
 
     keyboard = []
@@ -129,7 +130,7 @@ async def start(update: Update, context):
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        f"Welcome! Aapke paas abhi **{user['credits']} videos** baki hain.\nKripya category/channel select karein:",
+        f"Welcome! Aapke paas abhi **{user['credits']} videos** baki hain.\nKripya category select karein:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -149,7 +150,6 @@ async def source_selected(update: Update, context):
     parts = src_key.split(":")
     chat_id = parts[1]
     
-    # Get Name from DB
     if parts[0] == "channel":
         src_doc = sources_col.find_one({"type": "channel", "chat_id": chat_id})
     else:
@@ -168,10 +168,9 @@ async def source_selected(update: Update, context):
 
 async def handle_next_video(update: Update, context):
     user_id = update.effective_user.id
-
     user = get_user_data(user_id)
 
-    # CHECK LIMITS
+    # 1. CHECK LIMITS
     if user.get("credits", 0) <= 0:
         settings = get_settings()
         current_phase = user.get("phase", "FREE_20")
@@ -210,10 +209,10 @@ async def handle_next_video(update: Update, context):
 
     source_key = user.get("current_source")
     if not source_key:
-        await update.message.reply_text("Kripya pehle /start dabakar koi category ya channel select karein.")
+        await update.message.reply_text("Kripya pehle /start dabakar koi category select karein.")
         return
 
-    # DELETE PREVIOUS MESSAGES STRICTLY
+    # 2. DELETE PREVIOUS MESSAGES
     old_ids = list(set(user.get("sent_msg_ids", [])))
     if user.get("last_sent_video_id") and user.get("last_sent_video_id") not in old_ids:
         old_ids.append(user.get("last_sent_video_id"))
@@ -235,15 +234,22 @@ async def handle_next_video(update: Update, context):
         }
     )
 
-    # SEND NEW VIDEO
+    # 3. SEND NEW VIDEO WITH TOPIC START OFFSET
     parts = source_key.split(":")
-    chat_id = int(parts[1])
+    chat_id_str = parts[1]
+    chat_id = int(chat_id_str)
     
+    if parts[0] == "channel":
+        default_start = 1
+    else:
+        topic_doc = sources_col.find_one({"type": "topic", "chat_id": chat_id_str, "topic_id": int(parts[2])})
+        default_start = topic_doc.get("start_msg_id", 1) if topic_doc else 1
+
     offsets = user.get("offsets", {})
-    current_offset = offsets.get(source_key, 1)
+    current_offset = offsets.get(source_key, default_start)
 
     video_sent = False
-    max_search = current_offset + 50
+    max_search = current_offset + 200  # Checked up to 200 gaps
 
     while current_offset <= max_search:
         try:
@@ -277,51 +283,75 @@ async def handle_next_video(update: Update, context):
             logging.warning(f"Failed copying offset {current_offset}: {e}")
             current_offset += 1
 
-    # End reached: Reset offset
+    # End reached: Reset offset back to default_start
     if not video_sent:
-        offsets[source_key] = 1
+        offsets[source_key] = default_start
         users_col.update_one({"user_id": user_id}, {"$set": {"offsets": offsets}})
         
         await update.message.reply_text(
             "🔄 **Is category ke saare videos khatam ho gaye hain!**\n\nDobara dekhte rehne ke liye phir se **▶ Next Video** par click karein (videos shuru se repeat honge)."
         )
 
-# --- DYNAMIC MANAGEMENT ADMIN COMMANDS ---
+# --- DIRECT LINK AUTO-ADD HANDLER (WITHOUT SLASH COMMAND) ---
 
-async def add_channel(update: Update, context):
+async def handle_direct_link_add(update: Update, context):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    text = update.message.text.strip()
+    
+    # Regex Pattern to match t.me/c links with name: https://t.me/c/4412223111/9/10 Category Name
+    pattern = r"https://t\.me/c/(\d+)/(\d+)/(\d+)\s+(.+)"
+    match = re.match(pattern, text)
+
+    if match:
+        raw_group_id = match.group(1)
+        topic_id = int(match.group(2))
+        start_msg_id = int(match.group(3))
+        category_name = match.group(4).strip()
+
+        # Add -100 prefix for Telegram private supergroup ID
+        group_id = f"-100{raw_group_id}"
+
+        sources_col.update_one(
+            {"type": "topic", "chat_id": group_id, "topic_id": topic_id},
+            {"$set": {
+                "type": "topic", 
+                "chat_id": group_id, 
+                "topic_id": topic_id, 
+                "start_msg_id": start_msg_id, 
+                "name": category_name
+            }},
+            upsert=True
+        )
+
+        await update.message.reply_text(
+            f"✅ **Category Successfully Added!**\n\n"
+            f"📌 **Name:** {category_name}\n"
+            f"🆔 **Group ID:** `{group_id}`\n"
+            f"🧵 **Topic ID:** `{topic_id}`\n"
+            f"🎬 **Start Video ID:** `{start_msg_id}`",
+            parse_mode="Markdown"
+        )
+
+async def list_sources(update: Update, context):
     if update.effective_user.id != ADMIN_ID:
         return
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: `/addchannel <channel_id> <channel_name>`\nExample: `/addchannel -100123456789 Action Movies`", parse_mode="Markdown")
+    
+    sources = list(sources_col.find({}))
+    if not sources:
+        await update.message.reply_text("Koi bhi Category added nahi hai.")
         return
 
-    chat_id = context.args[0]
-    name = " ".join(context.args[1:])
+    text = "📋 **Added Categories:**\n\n"
+    for s in sources:
+        if s["type"] == "channel":
+            text += f"📢 **Channel:** {s['name']}\n`ID: {s['chat_id']}`\n\n"
+        else:
+            text += f"📁 **Topic:** {s['name']}\n`Group ID: {s['chat_id']}` | `Topic ID: {s['topic_id']}` | `Start ID: {s.get('start_msg_id', 1)}`\n\n"
 
-    sources_col.update_one(
-        {"type": "channel", "chat_id": chat_id},
-        {"$set": {"type": "channel", "chat_id": chat_id, "name": name}},
-        upsert=True
-    )
-    await update.message.reply_text(f"✅ Channel added/updated successfully:\n**Name:** {name}\n**ID:** `{chat_id}`", parse_mode="Markdown")
-
-async def add_topic(update: Update, context):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if len(context.args) < 3:
-        await update.message.reply_text("Usage: `/addtopic <group_id> <topic_id> <topic_name>`\nExample: `/addtopic -100987654321 5 Web Series`", parse_mode="Markdown")
-        return
-
-    group_id = context.args[0]
-    topic_id = int(context.args[1])
-    name = " ".join(context.args[2:])
-
-    sources_col.update_one(
-        {"type": "topic", "chat_id": group_id, "topic_id": topic_id},
-        {"$set": {"type": "topic", "chat_id": group_id, "topic_id": topic_id, "name": name}},
-        upsert=True
-    )
-    await update.message.reply_text(f"✅ Topic added/updated successfully:\n**Name:** {name}\n**Group ID:** `{group_id}`\n**Topic ID:** `{topic_id}`", parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 async def del_source(update: Update, context):
     if update.effective_user.id != ADMIN_ID:
@@ -333,24 +363,6 @@ async def del_source(update: Update, context):
     chat_id = context.args[0]
     res = sources_col.delete_many({"chat_id": chat_id})
     await update.message.reply_text(f"🗑 {res.deleted_count} source(s) deleted for Chat ID: `{chat_id}`", parse_mode="Markdown")
-
-async def list_sources(update: Update, context):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    
-    sources = list(sources_col.find({}))
-    if not sources:
-        await update.message.reply_text("Koi bhi Channel ya Topic added nahi hai.")
-        return
-
-    text = "📋 **Added Channels & Topics:**\n\n"
-    for s in sources:
-        if s["type"] == "channel":
-            text += f"📢 **Channel:** {s['name']}\n`ID: {s['chat_id']}`\n\n"
-        else:
-            text += f"📁 **Topic:** {s['name']}\n`Group ID: {s['chat_id']}` | `Topic ID: {s['topic_id']}`\n\n"
-
-    await update.message.reply_text(text, parse_mode="Markdown")
 
 async def set_today_link(update: Update, context):
     if update.effective_user.id != ADMIN_ID:
@@ -388,14 +400,15 @@ async def set_today_check(update: Update, context):
 def setup_handlers():
     if not telegram_app.handlers:
         telegram_app.add_handler(CommandHandler("start", start))
-        telegram_app.add_handler(CommandHandler("addchannel", add_channel))
-        telegram_app.add_handler(CommandHandler("addtopic", add_topic))
-        telegram_app.add_handler(CommandHandler("delsource", del_source))
         telegram_app.add_handler(CommandHandler("listall", list_sources))
+        telegram_app.add_handler(CommandHandler("delsource", del_source))
         telegram_app.add_handler(CommandHandler("todaylink", set_today_link))
         telegram_app.add_handler(CommandHandler("todaycheck", set_today_check))
         telegram_app.add_handler(CallbackQueryHandler(source_selected, pattern="^sel_src:"))
         telegram_app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r".*Next Video.*"), handle_next_video))
+        
+        # Automatic Link Detection for Admin
+        telegram_app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"https://t\.me/c/"), handle_direct_link_add))
 
 setup_handlers()
 
