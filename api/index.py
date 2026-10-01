@@ -86,6 +86,30 @@ def get_settings():
         settings_col.insert_one(settings)
     return settings
 
+# Helper: Broadcast notification to all registered users
+async def broadcast_new_source(context, names_list, is_topic=False):
+    users = list(users_col.find({}, {"user_id": 1}))
+    if not users:
+        return
+
+    if is_topic:
+        text = f"🎉 **New Topic Added!**\n\n📌 **Name:** {names_list[0]}\n\nAbhi /start dabayein aur new topic dekhein!"
+    else:
+        if len(names_list) == 1:
+            text = f"📢 **New Channel Added!**\n\n📌 **Name:** {names_list[0]}\n\nAbhi /start dabayein aur videos dekhein!"
+        else:
+            names_str = "\n".join([f"• {name}" for name in names_list])
+            text = f"📢 **New Channels Added!**\n\n{names_str}\n\nAbhi /start dabayein aur new channels dekhein!"
+
+    for u in users:
+        u_id = u.get("user_id")
+        if u_id:
+            try:
+                await context.bot.send_message(chat_id=u_id, text=text, parse_mode="Markdown")
+                await asyncio.sleep(0.05)  # Telegram rate-limit flood control
+            except Exception as e:
+                logging.warning(f"Could not send broadcast to {u_id}: {e}")
+
 # --- HANDLERS ---
 
 async def start(update: Update, context):
@@ -113,7 +137,6 @@ async def start(update: Update, context):
             await update.message.reply_text("✅ **Link-Hub Verification Successful!**\nAapko **10 extra videos** ka access mil gaya hai.")
             return
 
-    # Fetch dynamic categories/topics/channels from Mongo
     sources = list(sources_col.find({}))
     
     if not sources:
@@ -171,7 +194,6 @@ async def handle_next_video(update: Update, context):
     user_id = update.effective_user.id
     user = get_user_data(user_id)
 
-    # 1. CHECK LIMITS
     if user.get("credits", 0) <= 0:
         settings = get_settings()
         current_phase = user.get("phase", "FREE_20")
@@ -213,7 +235,6 @@ async def handle_next_video(update: Update, context):
         await update.message.reply_text("Kripya pehle /start dabakar koi category select karein.")
         return
 
-    # 2. DELETE PREVIOUS MESSAGES
     old_ids = list(set(user.get("sent_msg_ids", [])))
     if user.get("last_sent_video_id") and user.get("last_sent_video_id") not in old_ids:
         old_ids.append(user.get("last_sent_video_id"))
@@ -223,7 +244,6 @@ async def handle_next_video(update: Update, context):
     for msg_id in old_ids:
         try:
             await context.bot.delete_message(chat_id=user_id, message_id=int(msg_id))
-            logging.info(f"Successfully deleted message ID: {msg_id}")
         except Exception as e:
             logging.warning(f"Could not delete message ID {msg_id}: {e}")
 
@@ -235,7 +255,6 @@ async def handle_next_video(update: Update, context):
         }
     )
 
-    # 3. SEND NEW VIDEO WITH OFFSET
     parts = source_key.split(":")
     chat_id_str = parts[1]
     chat_id = int(chat_id_str)
@@ -277,11 +296,9 @@ async def handle_next_video(update: Update, context):
                 }
             )
 
-            logging.info(f"Sent and recorded video ID: {sent_video_msg_id}")
             video_sent = True
             break
         except Exception as e:
-            logging.warning(f"Failed copying offset {current_offset}: {e}")
             current_offset += 1
 
     if not video_sent:
@@ -292,7 +309,8 @@ async def handle_next_video(update: Update, context):
             "🔄 **Is category ke saare videos khatam ho gaye hain!**\n\nDobara dekhte rehne ke liye phir se **▶ Next Video** par click karein (videos shuru se repeat honge)."
         )
 
-# --- BULK CHANNEL / TOPIC AUTO-ADD HANDLER ---
+# --- AUTO-ADD HANDLER + AUTO BROADCAST ---
+
 async def handle_direct_add(update: Update, context):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
@@ -300,7 +318,7 @@ async def handle_direct_add(update: Update, context):
 
     text = update.message.text.strip()
 
-    # 1. Single Channel Format Check: "-1004432776763 Name Here"
+    # 1. Single Channel Format: "-1004432776763 Name Here"
     single_channel_pattern = r"^(-100\d+|\d+)\s+(.+)$"
     single_match = re.match(single_channel_pattern, text)
     if single_match and not text.startswith("{"):
@@ -314,20 +332,19 @@ async def handle_direct_add(update: Update, context):
         )
 
         await update.message.reply_text(
-            f"✅ **Channel Successfully Added!**\n\n"
-            f"📌 **Name:** {name_str}\n"
-            f"🆔 **Chat ID:** `{chat_id_str}`",
+            f"✅ **Channel Successfully Added!**\n\n📌 **Name:** {name_str}\n🆔 **Chat ID:** `{chat_id_str}`\n\n📢 *Broadcasting to all users...*",
             parse_mode="Markdown"
         )
+        await broadcast_new_source(context, [name_str], is_topic=False)
         return
 
-    # 2. JSON Dictionary Format (Multiple Bulk Channels)
+    # 2. JSON Dictionary Format (Bulk Channels)
     try:
         cleaned_text = re.sub(r',\s*([}\]])', r'\1', text)
         data = json.loads(cleaned_text)
 
         if isinstance(data, dict):
-            added_count = 0
+            added_names = []
             for chat_id, name in data.items():
                 chat_id_str = str(chat_id).strip()
                 name_str = str(name).strip()
@@ -337,17 +354,18 @@ async def handle_direct_add(update: Update, context):
                     {"$set": {"type": "channel", "chat_id": chat_id_str, "name": name_str}},
                     upsert=True
                 )
-                added_count += 1
+                added_names.append(name_str)
 
             await update.message.reply_text(
-                f"✅ **{added_count} Channels successfully added/updated!**",
+                f"✅ **{len(added_names)} Channels successfully added/updated!**\n\n📢 *Broadcasting to all users...*",
                 parse_mode="Markdown"
             )
+            await broadcast_new_source(context, added_names, is_topic=False)
             return
     except json.JSONDecodeError:
         pass
 
-    # 3. Topic Link Format Check
+    # 3. Topic Link Format: https://t.me/c/4412223111/9/10 Category Name
     pattern = r"https://t\.me/c/(\d+)/(\d+)/(\d+)\s+(.+)"
     match = re.match(pattern, text)
 
@@ -372,15 +390,10 @@ async def handle_direct_add(update: Update, context):
         )
 
         await update.message.reply_text(
-            f"✅ **Topic/Category Successfully Added!**\n\n"
-            f"📌 **Name:** {category_name}\n"
-            f"🆔 **Group ID:** `{group_id}`\n"
-            f"🧵 **Topic ID:** `{topic_id}`\n"
-            f"🎬 **Start Video ID:** `{start_msg_id}`",
+            f"✅ **Topic/Category Successfully Added!**\n\n📌 **Name:** {category_name}\n🆔 **Group ID:** `{group_id}`\n🧵 **Topic ID:** `{topic_id}`\n🎬 **Start Video ID:** `{start_msg_id}`\n\n📢 *Broadcasting to all users...*",
             parse_mode="Markdown"
         )
-
-
+        await broadcast_new_source(context, [category_name], is_topic=True)
 
 async def list_sources(update: Update, context):
     if update.effective_user.id != ADMIN_ID:
@@ -453,8 +466,6 @@ def setup_handlers():
         telegram_app.add_handler(CommandHandler("todaycheck", set_today_check))
         telegram_app.add_handler(CallbackQueryHandler(source_selected, pattern="^sel_src:"))
         telegram_app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r".*Next Video.*"), handle_next_video))
-        
-        # Bulk Channels JSON & Topics Auto-Add Handler
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_direct_add))
 
 setup_handlers()
