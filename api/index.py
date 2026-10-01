@@ -24,31 +24,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URI = os.environ.get("MONGO_URI")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-# Channels List (-100... ID format)
-CHANNELS = {
-    "-1004469752383": "cosplay",
-    "-1004446913778": "teeny",
-    "-1004426647894": "chinese av",
-    "-1003733602008":"aunty judy",
-    "-1003909539492":"transangell",
-    "-1004372390753":"cuckold",
-    "-1003904347191":"deeper",
-    "-1004422972425":"mlif only",
-    "-1004384588902":"miya Khalifa",
-    "-1003814470304":"lesbian girl short video",
-    "-1004448137605":"prev mom",
-    "-1004438167829":"faciall abvse",
-    "-1004424185925":"kink wipppeddd",
-    "-1003942855264":"mon son",
-    "-1004416265673":"diper girl",
-    "-1004291109813":"western part 1",
-    "-1004385500716":"fistingbr",
-    "-1004481958270":"hot she male",
-    "-1004217990146":"girl cum",
-    "-1004397104349":"sexy",
-}
-
-LINKHUB_URL = "https://link-target.net/9492120/cJDe6fkzGXrl"
+LINKHUB_URL = "https://link-hub.net/9492120/ZKeea2Ckcp73"
 LINKHUB_PARAM = "verifyget30ywhahB"
 
 # --- MONGO CONNECTION ---
@@ -61,11 +37,12 @@ mongo_client = MongoClient(
 db = mongo_client["telegram_bot_dbviral"]
 users_col = db["usersviral"]
 settings_col = db["settings"]
+sources_col = db["sources"]  # Dynamic Channels & Topics collection
 
 # Telegram Application Setup
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# Helper: Get/Initialize User Data with Daily Reset
+# Helper: Get/Initialize User Data
 def get_user_data(user_id: int):
     today_str = datetime.now().strftime("%Y-%m-%d")
     user = users_col.find_one({"user_id": user_id})
@@ -75,23 +52,22 @@ def get_user_data(user_id: int):
             "user_id": user_id,
             "last_active_date": today_str,
             "credits": 7,
-            "phase": "FREE_7",
-            "current_channel": None,
+            "phase": "FREE_20",
+            "current_source": None,  # Can be Channel or Topic key
             "offsets": {},
             "sent_msg_ids": []
         }
         users_col.insert_one(user)
     elif user.get("last_active_date") != today_str:
-        # HAR NAYE DIN SAB KUCH RESET HOGA
         user["last_active_date"] = today_str
         user["credits"] = 7
-        user["phase"] = "FREE_7"
+        user["phase"] = "FREE_20"
         users_col.update_one(
             {"user_id": user_id},
             {"$set": {
                 "last_active_date": today_str, 
                 "credits": 7, 
-                "phase": "FREE_7"
+                "phase": "FREE_20"
             }}
         )
     return user
@@ -119,7 +95,6 @@ async def start(update: Update, context):
         start_param = args[0]
         settings = get_settings()
         
-        # 1. VPLink Verification Handler (Unlocks 30 Videos)
         if start_param == settings.get("vplink_param"):
             users_col.update_one(
                 {"user_id": user_id},
@@ -128,7 +103,6 @@ async def start(update: Update, context):
             await update.message.reply_text("✅ **VPLink Verification Successful!**\nAapko **30 videos** ka access mil gaya hai.")
             return
 
-        # 2. Link-Hub Verification Handler (Unlocks 10 Extra Videos)
         if start_param == LINKHUB_PARAM:
             users_col.update_one(
                 {"user_id": user_id},
@@ -137,35 +111,57 @@ async def start(update: Update, context):
             await update.message.reply_text("✅ **Link-Hub Verification Successful!**\nAapko **10 extra videos** ka access mil gaya hai.")
             return
 
+    # Fetch dynamic channels and topics from Mongo
+    sources = list(sources_col.find({}))
+    
+    if not sources:
+        await update.message.reply_text("Abhi tak koi Category/Channel add nahi kiya gaya hai. Admin se sampark karein.")
+        return
+
     keyboard = []
-    for channel_id, channel_name in CHANNELS.items():
-        keyboard.append([InlineKeyboardButton(channel_name, callback_data=f"select_chan:{channel_id}")])
+    for src in sources:
+        key = f"{src['type']}:{src['chat_id']}"
+        if src['type'] == 'topic':
+            key += f":{src['topic_id']}"
+            
+        display_name = f"📁 {src['name']}" if src['type'] == 'topic' else f"📢 {src['name']}"
+        keyboard.append([InlineKeyboardButton(display_name, callback_data=f"sel_src:{key}")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        f"Welcome! Aapke paas abhi **{user['credits']} videos** baki hain.\nKripya channel select karein:",
+        f"Welcome! Aapke paas abhi **{user['credits']} videos** baki hain.\nKripya category/channel select karein:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
-async def channel_selected(update: Update, context):
+async def source_selected(update: Update, context):
     query = update.callback_query
     await query.answer()
     
     user_id = query.from_user.id
-    channel_id = query.data.split(":")[1]
+    src_key = query.data.replace("sel_src:", "")
     
     users_col.update_one(
         {"user_id": user_id},
-        {"$set": {"current_channel": channel_id}}
+        {"$set": {"current_source": src_key}}
     )
     
-    channel_name = CHANNELS.get(channel_id, "Channel")
+    parts = src_key.split(":")
+    chat_id = parts[1]
+    
+    # Get Name from DB
+    if parts[0] == "channel":
+        src_doc = sources_col.find_one({"type": "channel", "chat_id": chat_id})
+    else:
+        src_doc = sources_col.find_one({"type": "topic", "chat_id": chat_id, "topic_id": int(parts[2])})
+
+    src_name = src_doc["name"] if src_doc else "Selected Category"
+    
     menu_keyboard = [[KeyboardButton("▶ Next Video")]]
     reply_markup = ReplyKeyboardMarkup(menu_keyboard, resize_keyboard=True)
     
     await query.message.reply_text(
-        f"Aapne **{channel_name}** chun liya hai.\nNiche diye gaye **▶ Next Video** button par click karein.",
+        f"Aapne **{src_name}** chun liya hai.\nNiche diye gaye **▶ Next Video** button par click karein.",
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
@@ -173,16 +169,14 @@ async def channel_selected(update: Update, context):
 async def handle_next_video(update: Update, context):
     user_id = update.effective_user.id
 
-    # 1. FETCH USER DATA & VERIFY DAILY RESET
     user = get_user_data(user_id)
 
-    # 2. CHECK LIMITS & PHASES
+    # CHECK LIMITS
     if user.get("credits", 0) <= 0:
         settings = get_settings()
         current_phase = user.get("phase", "FREE_20")
         
-        # Step A: 20 Free Credits Over -> Ask for VPLink
-        if current_phase in ["FREE_7", "NEED_VPLINK"]:
+        if current_phase in ["FREE_20", "NEED_VPLINK"]:
             vplink = settings.get("vplink_url", "https://vplink.in/M44")
             users_col.update_one({"user_id": user_id}, {"$set": {"phase": "NEED_VPLINK"}})
             
@@ -194,7 +188,6 @@ async def handle_next_video(update: Update, context):
             )
             return
 
-        # Step B: 30 VPLink Credits Over -> Ask for Link-Hub
         elif current_phase in ["VERIFIED_30", "NEED_LINKHUB"]:
             users_col.update_one({"user_id": user_id}, {"$set": {"phase": "NEED_LINKHUB"}})
             
@@ -206,7 +199,6 @@ async def handle_next_video(update: Update, context):
             )
             return
 
-        # Step C: Extra 10 Credits Over -> Ask for Link-Hub again (Loop for rest of the day)
         elif current_phase in ["EXTRA_10"]:
             keyboard = [[InlineKeyboardButton("🔗 Verify on Link-Hub", url=LINKHUB_URL)]]
             await update.message.reply_text(
@@ -216,12 +208,12 @@ async def handle_next_video(update: Update, context):
             )
             return
 
-    channel_id_str = user.get("current_channel")
-    if not channel_id_str:
-        await update.message.reply_text("Kripya pehle /start dabakar koi channel select karein.")
+    source_key = user.get("current_source")
+    if not source_key:
+        await update.message.reply_text("Kripya pehle /start dabakar koi category ya channel select karein.")
         return
 
-    # 3. DELETE PREVIOUS MESSAGES STRICTLY
+    # DELETE PREVIOUS MESSAGES STRICTLY
     old_ids = list(set(user.get("sent_msg_ids", [])))
     if user.get("last_sent_video_id") and user.get("last_sent_video_id") not in old_ids:
         old_ids.append(user.get("last_sent_video_id"))
@@ -235,7 +227,6 @@ async def handle_next_video(update: Update, context):
         except Exception as e:
             logging.warning(f"Could not delete message ID {msg_id}: {e}")
 
-    # Clear old IDs from Mongo
     users_col.update_one(
         {"user_id": user_id},
         {
@@ -244,10 +235,12 @@ async def handle_next_video(update: Update, context):
         }
     )
 
-    # 4. SEND NEW VIDEO WITH REPEAT LOGIC
-    channel_id = int(channel_id_str)
+    # SEND NEW VIDEO
+    parts = source_key.split(":")
+    chat_id = int(parts[1])
+    
     offsets = user.get("offsets", {})
-    current_offset = offsets.get(channel_id_str, 1)
+    current_offset = offsets.get(source_key, 1)
 
     video_sent = False
     max_search = current_offset + 50
@@ -256,16 +249,15 @@ async def handle_next_video(update: Update, context):
         try:
             sent_msg = await context.bot.copy_message(
                 chat_id=user_id,
-                from_chat_id=channel_id,
+                from_chat_id=chat_id,
                 message_id=current_offset,
                 protect_content=True
             )
             
-            new_credits = user.get("credits", 20) - 1
-            offsets[channel_id_str] = current_offset + 1
+            new_credits = user.get("credits", 7) - 1
+            offsets[source_key] = current_offset + 1
             sent_video_msg_id = int(sent_msg.message_id)
 
-            # Store fresh message ID in Mongo
             users_col.update_one(
                 {"user_id": user_id},
                 {
@@ -285,14 +277,80 @@ async def handle_next_video(update: Update, context):
             logging.warning(f"Failed copying offset {current_offset}: {e}")
             current_offset += 1
 
-    # End reached: Offset ko firse 1 par reset karo
+    # End reached: Reset offset
     if not video_sent:
-        offsets[channel_id_str] = 1
+        offsets[source_key] = 1
         users_col.update_one({"user_id": user_id}, {"$set": {"offsets": offsets}})
         
         await update.message.reply_text(
-            "🔄 **Is channel ke saare videos khatam ho gaye hain!**\n\nDobara dekhte rehne ke liye phir se **▶ Next Video** par click karein (videos shuru se repeat honge)."
+            "🔄 **Is category ke saare videos khatam ho gaye hain!**\n\nDobara dekhte rehne ke liye phir se **▶ Next Video** par click karein (videos shuru se repeat honge)."
         )
+
+# --- DYNAMIC MANAGEMENT ADMIN COMMANDS ---
+
+async def add_channel(update: Update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: `/addchannel <channel_id> <channel_name>`\nExample: `/addchannel -100123456789 Action Movies`", parse_mode="Markdown")
+        return
+
+    chat_id = context.args[0]
+    name = " ".join(context.args[1:])
+
+    sources_col.update_one(
+        {"type": "channel", "chat_id": chat_id},
+        {"$set": {"type": "channel", "chat_id": chat_id, "name": name}},
+        upsert=True
+    )
+    await update.message.reply_text(f"✅ Channel added/updated successfully:\n**Name:** {name}\n**ID:** `{chat_id}`", parse_mode="Markdown")
+
+async def add_topic(update: Update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if len(context.args) < 3:
+        await update.message.reply_text("Usage: `/addtopic <group_id> <topic_id> <topic_name>`\nExample: `/addtopic -100987654321 5 Web Series`", parse_mode="Markdown")
+        return
+
+    group_id = context.args[0]
+    topic_id = int(context.args[1])
+    name = " ".join(context.args[2:])
+
+    sources_col.update_one(
+        {"type": "topic", "chat_id": group_id, "topic_id": topic_id},
+        {"$set": {"type": "topic", "chat_id": group_id, "topic_id": topic_id, "name": name}},
+        upsert=True
+    )
+    await update.message.reply_text(f"✅ Topic added/updated successfully:\n**Name:** {name}\n**Group ID:** `{group_id}`\n**Topic ID:** `{topic_id}`", parse_mode="Markdown")
+
+async def del_source(update: Update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: `/delsource <chat_id>`", parse_mode="Markdown")
+        return
+
+    chat_id = context.args[0]
+    res = sources_col.delete_many({"chat_id": chat_id})
+    await update.message.reply_text(f"🗑 {res.deleted_count} source(s) deleted for Chat ID: `{chat_id}`", parse_mode="Markdown")
+
+async def list_sources(update: Update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    sources = list(sources_col.find({}))
+    if not sources:
+        await update.message.reply_text("Koi bhi Channel ya Topic added nahi hai.")
+        return
+
+    text = "📋 **Added Channels & Topics:**\n\n"
+    for s in sources:
+        if s["type"] == "channel":
+            text += f"📢 **Channel:** {s['name']}\n`ID: {s['chat_id']}`\n\n"
+        else:
+            text += f"📁 **Topic:** {s['name']}\n`Group ID: {s['chat_id']}` | `Topic ID: {s['topic_id']}`\n\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 async def set_today_link(update: Update, context):
     if update.effective_user.id != ADMIN_ID:
@@ -330,9 +388,13 @@ async def set_today_check(update: Update, context):
 def setup_handlers():
     if not telegram_app.handlers:
         telegram_app.add_handler(CommandHandler("start", start))
+        telegram_app.add_handler(CommandHandler("addchannel", add_channel))
+        telegram_app.add_handler(CommandHandler("addtopic", add_topic))
+        telegram_app.add_handler(CommandHandler("delsource", del_source))
+        telegram_app.add_handler(CommandHandler("listall", list_sources))
         telegram_app.add_handler(CommandHandler("todaylink", set_today_link))
         telegram_app.add_handler(CommandHandler("todaycheck", set_today_check))
-        telegram_app.add_handler(CallbackQueryHandler(channel_selected, pattern="^select_chan:"))
+        telegram_app.add_handler(CallbackQueryHandler(source_selected, pattern="^sel_src:"))
         telegram_app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r".*Next Video.*"), handle_next_video))
 
 setup_handlers()
