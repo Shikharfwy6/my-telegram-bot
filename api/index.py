@@ -66,18 +66,15 @@ async def start(update: Update, context):
     if args:
         start_param = args[0]
         
-        # Check if param is a token verification (e.g., cXPMkiDCmU)
-        # Tokens can be checked in MongoDB collection `tokens` or `tokens_col`
+        # Check if param is a token verification
         token_doc = tokens_col.find_one({"token": start_param})
         if token_doc:
             if token_doc.get("status") == "unused":
-                # Mark token as used
                 tokens_col.update_one({"token": start_param}, {"$set": {"status": "used"}})
                 users_col.update_one({"user_id": user_id}, {"$set": {"is_verified": True}})
                 
                 await update.message.reply_text("✅ **Verification Successful!**\nAapko video ka access mil gaya hai. Niche **▶ Next Video** button par click karein.")
                 
-                # Show Next Video button
                 menu_keyboard = [[KeyboardButton("▶ Next Video")]]
                 reply_markup = ReplyKeyboardMarkup(menu_keyboard, resize_keyboard=True)
                 await update.message.reply_text("Ab aap videos dekh sakte hain:", reply_markup=reply_markup)
@@ -87,23 +84,23 @@ async def start(update: Update, context):
                 return
 
         # Check if param is video range format: 757_758_1_2 (or similar from deep link)
-        # Format example: start=757_758 (Start ID and End ID from channel)
         match = re.match(r"^(\d+)_(\d+)", start_param)
         if match:
             start_id = int(match.group(1))
             end_id = int(match.group(2))
             
-            # Since bot is admin in the channel, we can fetch from the channel chat or store it.
-            # Here we assume the deep link comes with chat info or user sets it.
-            # Let's save the range for the user.
+            # Yahan hum aapka specific channel ID (-1003557690577) ya default source set kar rahe hain
+            target_chat_id = "-1003557690577"
+            
             users_col.update_one(
                 {"user_id": user_id},
                 {
                     "$set": {
+                        "current_chat_id": target_chat_id,  # <-- FIX: Chat ID save ho rahi hai taaki copy_message fail na ho
                         "current_start_id": start_id,
                         "current_end_id": end_id,
                         "current_video_offset": start_id,
-                        "is_verified": True # First time entry via deep link can give direct access or require verification based on flow
+                        "is_verified": True 
                     }
                 }
             )
@@ -133,7 +130,6 @@ async def handle_next_video(update: Update, context):
 
     # Check if user is verified for the next video
     if not user.get("is_verified", False):
-        website_url = "https://ad3-mu.vercel.cpp/" # or your website link
         keyboard = [[InlineKeyboardButton("🌐 Verify on Website", url="https://ad3-mu.vercel.app/")]]
         await update.message.reply_text(
             "🔒 **Verification Required!**\n\nAgli video dekhne ke liye niche diye gaye link par click karke verify karein aur apna verification code bot ko bhejein:",
@@ -192,7 +188,6 @@ async def handle_admin_setup(update: Update, context):
         return
 
     text = update.message.text.strip()
-    # Format for saving channel chat_id: e.g., "-100xxxxxxxxxx"
     if text.startswith("-100") or text.isdigit():
         sources_col.update_one(
             {"chat_id": text},
