@@ -35,7 +35,7 @@ mongo_client = MongoClient(
 )
 db = mongo_client["telegram_bot_dbviral"]
 users_col = db["usersviral"]
-tokens_col = db["tokens"]       # Token verification collection
+tokens_col = db["tokans"]       # Token verification collection
 sources_col = db["sources"]      # Channel/Videos configuration collection
 
 # Telegram Application Setup
@@ -67,14 +67,18 @@ async def start(update: Update, context):
         start_param = args[0]
         
         # Check if param is a token verification
-        token_doc = tokens_col.find_one({"token": start_param})
+        
+        # Check token verification in MongoDB collection `tokans`
+        token_doc = tokens_col.find_one({"tokan": start_param})  # 'token' ki jagah 'tokan'
         if token_doc:
             if token_doc.get("status") == "unused":
-                tokens_col.update_one({"token": start_param}, {"$set": {"status": "used"}})
+                # Mark token as used
+                tokens_col.update_one({"tokan": start_param}, {"$set": {"status": "used"}})
                 users_col.update_one({"user_id": user_id}, {"$set": {"is_verified": True}})
                 
                 await update.message.reply_text("✅ **Verification Successful!**\nAapko video ka access mil gaya hai. Niche **▶ Next Video** button par click karein.")
                 
+                # Show Next Video button
                 menu_keyboard = [[KeyboardButton("▶ Next Video")]]
                 reply_markup = ReplyKeyboardMarkup(menu_keyboard, resize_keyboard=True)
                 await update.message.reply_text("Ab aap videos dekh sakte hain:", reply_markup=reply_markup)
