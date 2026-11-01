@@ -3,6 +3,7 @@ import re
 import json
 import logging
 import asyncio
+import base64
 from datetime import datetime
 from flask import Flask, request, jsonify
 from pymongo import MongoClient
@@ -56,6 +57,36 @@ def get_user_data(user_id: int):
         users_col.insert_one(user)
     return user
 
+# --- 🔐 STRICT DECODER FUNCTION (New Encrypted Format Only) ---
+def decode_payload(encoded_str):
+    try:
+        if not encoded_str:
+            return None
+        
+        # Agar purana format hai (jaise sirf numbers aur underscores: 811_815_1_2), toh ise strictly reject kar do
+        if all(c.isdigit() or c == '_' for c in encoded_str):
+            return None
+
+        # New format decoding: parts are separated by '_'
+        parts = encoded_str.split('_')
+        decoded_parts = []
+        
+        for part in parts:
+            sub_chunks = part.split()
+            char_str = ""
+            for chunk in sub_chunks:
+                # Base64 decode each chunk back to binary string
+                b64_decoded = base64.b64decode(chunk + "==").decode('utf-8')
+                # Binary to character conversion
+                decimal_val = int(b64_decoded, 2)
+                char_str += chr(decimal_val)
+            decoded_parts.append(char_str)
+            
+        return "_".join(decoded_parts)
+    except Exception as e:
+        print(f"⚠️ Decoding Error: {e}")
+        return None
+
 # --- HANDLERS ---
 
 async def start(update: Update, context):
@@ -66,10 +97,8 @@ async def start(update: Update, context):
     if args:
         start_param = args[0]
         
-        # Check if param is a token verification
-        
         # Check token verification in MongoDB collection `tokans`
-        token_doc = tokens_col.find_one({"tokan": start_param})  # 'token' ki jagah 'tokan'
+        token_doc = tokens_col.find_one({"tokan": start_param})
         if token_doc:
             if token_doc.get("status") == "unused":
                 # Mark token as used
@@ -87,20 +116,27 @@ async def start(update: Update, context):
                 await update.message.reply_text("❌ **Yeh token pehle hi use ho chuka hai!** Kripya naya verification karein.")
                 return
 
-        # Check if param is video range format: 757_758_1_2 (or similar from deep link)
-        match = re.match(r"^(\d+)_(\d+)", start_param)
+        # 🔓 Decode the new payload format
+        decoded_arg = decode_payload(start_param)
+        
+        # Agar purana format diya gaya hoga toh decoded_arg `None` return karega
+        if not decoded_arg:
+            await update.message.reply_text("❌ **Invalid Link!**\n\nYeh link invalid ya purana format ka hai. Kripya naya valid link use karein.")
+            return
+
+        # Check if decoded format matches video range format: e.g., 757_758_1_2
+        match = re.match(r"^(\d+)_(\d+)", decoded_arg)
         if match:
             start_id = int(match.group(1))
             end_id = int(match.group(2))
             
-            # Yahan hum aapka specific channel ID (-1003557690577) ya default source set kar rahe hain
             target_chat_id = "-1003557690577"
             
             users_col.update_one(
                 {"user_id": user_id},
                 {
                     "$set": {
-                        "current_chat_id": target_chat_id,  # <-- FIX: Chat ID save ho rahi hai taaki copy_message fail na ho
+                        "current_chat_id": target_chat_id,
                         "current_start_id": start_id,
                         "current_end_id": end_id,
                         "current_video_offset": start_id,
@@ -147,7 +183,6 @@ async def handle_next_video(update: Update, context):
     source_chat_id = user.get("current_chat_id")
 
     if not source_chat_id:
-        # Fallback to default admin/source channel if stored in sources collection
         src = sources_col.find_one({})
         if src:
             source_chat_id = src.get("chat_id")
@@ -160,7 +195,6 @@ async def handle_next_video(update: Update, context):
         return
 
     try:
-        # Send video from channel
         sent_msg = await context.bot.copy_message(
             chat_id=user_id,
             from_chat_id=int(source_chat_id),
@@ -168,19 +202,17 @@ async def handle_next_video(update: Update, context):
             protect_content=True
         )
         
-        # Update offset and reset verification status so next video requires re-verification via website
         users_col.update_one(
             {"user_id": user_id},
             {
                 "$set": {
                     "current_video_offset": current_offset + 1,
-                    "is_verified": False  # Next video ke liye dubara verification chahiye hoga
+                    "is_verified": False  
                 }
             }
         )
     except Exception as e:
         logging.error(f"Error copying video message: {e}")
-        # Try next ID if current message doesn't exist
         users_col.update_one({"user_id": user_id}, {"$set": {"current_video_offset": current_offset + 1}})
         await update.message.reply_text("⚠️ Yeh video nahi mili, agli try kar rahe hain... Phir se **▶ Next Video** dabayein.")
 
@@ -213,7 +245,7 @@ setup_handlers()
 
 @app.route("/", methods=["GET"])
 def index():
-    return "Bot status: Running successfully on Vercel!", 200
+    return "Bot status: Running successfully on Vercel with Encrypted Payload Checking!", 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
