@@ -57,35 +57,46 @@ def get_user_data(user_id: int):
         users_col.insert_one(user)
     return user
 
-# --- 🔐 STRICT DECODER FUNCTION (New Encrypted Format Only) ---
+# --- 🔐 UPDATED URL-SAFE DECODER FUNCTION ---
 def decode_payload(encoded_str):
     try:
         if not encoded_str:
             return None
         
-        # Agar purana format hai (jaise sirf numbers aur underscores: 811_815_1_2), toh ise strictly reject kar do
-        if all(c.isdigit() or c == '_' for c in encoded_str):
-            return None
-
-        # New format decoding: parts are separated by '_'
-        parts = encoded_str.split('_')
-        decoded_parts = []
+        # Agar purana format hai (jaise sirf numbers aur underscores: 811_815_1_2), toh ise reject kar do agar required ho
+        # Lekin agar naya url-safe base64 format hai toh use decode karenge:
         
-        for part in parts:
-            sub_chunks = part.split()
-            char_str = ""
-            for chunk in sub_chunks:
-                # Base64 decode each chunk back to binary string
-                b64_decoded = base64.b64decode(chunk + "==").decode('utf-8')
-                # Binary to character conversion
-                decimal_val = int(b64_decoded, 2)
-                char_str += chr(decimal_val)
-            decoded_parts.append(char_str)
+        # Telegram deep link me spaces '_' underscores ya hyphens ki tarah treat ho sakte hain ya spaces aa sakte hain.
+        # Sabhi spaces ko wapas base64 format me adjust karna padta hai.
+        cleaned_str = encoded_str.replace('_', '/') # Agar underscores base64url ke slash ki jagah hain
+        
+        # Padding fix karein agar missing ho
+        padding = 4 - (len(cleaned_str) % 4)
+        if padding < 4:
+            cleaned_str += '=' * padding
             
-        return "_".join(decoded_parts)
+        # URL-safe base64 decode try karein
+        message_bytes = base64.urlsafe_b64decode(cleaned_str.encode('utf-8'))
+        decoded_str = message_bytes.decode('utf-8')
+        return decoded_str
+        
     except Exception as e:
-        print(f"⚠️ Decoding Error: {e}")
-        return None
+        # Fallback: Agar upar wala fail ho toh purane chunk/binary decoding method ko try karlo (backward compatibility ke liye)
+        try:
+            parts = encoded_str.split('_')
+            decoded_parts = []
+            for part in parts:
+                sub_chunks = part.split()
+                char_str = ""
+                for chunk in sub_chunks:
+                    b64_decoded = base64.b64decode(chunk + "==").decode('utf-8')
+                    decimal_val = int(b64_decoded, 2)
+                    char_str += chr(decimal_val)
+                decoded_parts.append(char_str)
+            return "_".join(decoded_parts)
+        except Exception as inner_e:
+            print(f"⚠️ Decoding Error (All methods failed): {inner_e}")
+            return None
 
 # --- HANDLERS ---
 
@@ -116,16 +127,15 @@ async def start(update: Update, context):
                 await update.message.reply_text("❌ **Yeh token pehle hi use ho chuka hai!** Kripya naya verification karein.")
                 return
 
-        # 🔓 Decode the new payload format
+        # 🔓 Decode the payload format
         decoded_arg = decode_payload(start_param)
         
-        # Agar purana format diya gaya hoga toh decoded_arg `None` return karega
         if not decoded_arg:
-            await update.message.reply_text("❌ **Invalid Link!**\n\nYeh link invalid ya purana format ka hai. Kripya naya valid link use karein.")
+            await update.message.reply_text("❌ **Invalid Link!**\n\nYeh link invalid ya corrupted hai. Kripya naya valid link use karein.")
             return
 
-        # Check if decoded format matches video range format: e.g., 757_758_1_2
-        match = re.match(r"^(\d+)_(\d+)", decoded_arg)
+        # Check if decoded format matches video range format: e.g., 757_758_1_2 ya numbers
+        match = re.search(r"(\d+)_(\d+)", decoded_arg)
         if match:
             start_id = int(match.group(1))
             end_id = int(match.group(2))
@@ -153,6 +163,9 @@ async def start(update: Update, context):
                 parse_mode="Markdown",
                 reply_markup=reply_markup
             )
+            return
+        else:
+            await update.message.reply_text(f"⚠️ **Decoded data format match nahi hua:** `{decoded_arg}`", parse_mode="Markdown")
             return
 
     # Default Start Message if no args
@@ -245,7 +258,7 @@ setup_handlers()
 
 @app.route("/", methods=["GET"])
 def index():
-    return "Bot status: Running successfully on Vercel with Encrypted Payload Checking!", 200
+    return "Bot status: Running successfully on Vercel with Updated URL-Safe Decoder!", 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -260,7 +273,7 @@ def webhook():
                 await telegram_app.shutdown()
 
             asyncio.run(process_update_async())
-            return "OK", 200
+            return "URL decoded successfully", 200
         except Exception as e:
             logging.error(f"Error processing webhook update: {e}", exc_info=True)
             return jsonify({"error": str(e)}), 500
